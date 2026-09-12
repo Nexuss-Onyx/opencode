@@ -38,8 +38,95 @@ function isRetryable(status: number, message: string): boolean {
   );
 }
 
-// OpenAI-compatible chat completion against the OmniRoute gateway
-async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (info: any) => void) {
+// Read a gateway SSE stream. Reasoning deltas are pushed to the client live,
+// while content and tool calls are accumulated into a complete assistant message.
+async function readStream(res: any, onReasoning?: (text: string) => void): Promise<any> {
+  const reader = res.body?.getReader?.();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let contentAcc = "";
+  let reasoningAcc = "";
+  const toolMap = new Map<number, any>();
+  let sawChunk = false;
+
+  const build = (): any => {
+    const message: any = { content: contentAcc || null };
+    if (reasoningAcc) message.reasoning = reasoningAcc;
+    if (toolMap.size > 0) message.tool_calls = [...toolMap.values()];
+    return message;
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") return build();
+      let ch: any = null;
+      try {
+        ch = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+      if (ch?.error) {
+        throw new Error(`OmniRoute stream error: ${String(ch?.error?.message || ch?.error).slice(0, 300)}`);
+      }
+      const delta = ch?.choices?.[0]?.delta;
+      if (!delta) continue;
+      sawChunk = true;
+      if (typeof delta.reasoning === "string") {
+        reasoningAcc += delta.reasoning;
+        onReasoning?.(reasoningAcc);
+      }
+      if (typeof delta.content === "string" && delta.content) contentAcc += delta.content;
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const callIndex = tc.index ?? 0;
+          let cur = toolMap.get(callIndex);
+          if (!cur) {
+            cur = { id: tc.id || `call_${callIndex}`, type: "function", function: { name: "", arguments: "" } };
+            toolMap.set(callIndex, cur);
+          }
+          if (tc.id) cur.id = tc.id;
+          if (tc.type) cur.type = tc.type;
+          if (tc.function?.name) cur.function.name += tc.function.name;
+          if (tc.function?.arguments) cur.function.arguments += tc.function.arguments;
+        }
+      }
+    }
+  }
+
+  // Fallback: gateway responded with plain JSON instead of SSE
+  if (!sawChunk && buffer.trim()) {
+    try {
+      const full = JSON.parse(buffer);
+      const msg = full?.choices?.[0]?.message;
+      if (msg) {
+        return {
+          content: msg.content ?? null,
+          reasoning: msg.reasoning || msg.reasoning_details?.[0]?.text || "",
+          tool_calls: msg.tool_calls || undefined,
+        };
+      }
+    } catch {
+      /* not JSON — ignore */
+    }
+  }
+  return build();
+}
+
+// OpenAI-compatible chat completion against the OmniRoute gateway.
+// Uses SSE streaming so reasoning deltas stream to the client live.
+async function chatCompletion(
+  messages: any[],
+  openaiTools: any[],
+  hooks?: { onRetry?: (info: any) => void; onReasoning?: (text: string) => void }
+) {
   let lastError: any = null;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     const body: any = {
@@ -47,6 +134,7 @@ async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (in
       messages,
       temperature: 0.7,
       max_tokens: 800,
+      stream: true,
     };
     if (openaiTools.length > 0) {
       body.tools = openaiTools;
@@ -62,33 +150,32 @@ async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (in
         },
         body: JSON.stringify(body),
       });
-      if (res.ok) {
-        const data: any = await res.json();
-        return data.choices?.[0]?.message ?? null;
-      }
-      const text = await res.text();
-      let json: any = null;
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = null;
-      }
-      const code = String(json?.error?.code || json?.code || "").toLowerCase();
-      const upstream = String(json?.error?.message || json?.message || text);
-      const msg = `OmniRoute API error ${res.status}: ${upstream.slice(0, 500)}`;
-      lastError = new Error(msg);
 
-      // Only auth/unknown-model errors are truly permanent — abort immediately.
-      if (
-        /invalid_api_key|apikey|api.?key|unauthorized|forbidden|model.?not.?found|no such model|invalid model|not a model/i.test(
-          code + " " + upstream
-        )
-      ) {
-        console.error(`OmniRoute permanent error (code=${code || res.status}) — aborting`);
-        break;
-      }
+      if (!res.ok) {
+        const text = await res.text();
+        let json: any = null;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          json = null;
+        }
+        const code = String(json?.error?.code || json?.code || "").toLowerCase();
+        const upstream = String(json?.error?.message || json?.message || text);
+        const msg = `OmniRoute API error ${res.status}: ${upstream.slice(0, 500)}`;
+        lastError = new Error(msg);
 
-      if (!isRetryable(res.status, upstream)) break;
+        if (
+          /invalid_api_key|apikey|api.?key|unauthorized|forbidden|model.?not.?found|no such model|invalid model|not a model/i.test(
+            code + " " + upstream
+          )
+        ) {
+          console.error(`OmniRoute permanent error (code=${code || res.status}) — aborting`);
+          break;
+        }
+        if (!isRetryable(res.status, upstream)) break;
+      } else {
+        return await readStream(res, hooks?.onReasoning);
+      }
     } catch (e: any) {
       lastError = e;
       if (!isRetryable(0, e?.message || "")) break;
@@ -101,14 +188,12 @@ async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (in
           delayMs / 1000
         )}s — ${lastError?.message ?? "transient failure"}`
       );
-      if (onRetry) {
-        onRetry({
-          attempt: attempt + 1,
-          total: RETRY_DELAYS_MS.length,
-          delayMs,
-          error: lastError?.message ?? "transient failure",
-        });
-      }
+      hooks?.onRetry?.({
+        attempt: attempt + 1,
+        total: RETRY_DELAYS_MS.length,
+        delayMs,
+        error: lastError?.message ?? "transient failure",
+      });
       await sleep(delayMs);
     }
   }
@@ -519,9 +604,10 @@ app.post("/api/chat", async (req, res) => {
       );
     }
 
-    const gptMessage = await chatCompletion(trimmedMessages, tools, (info) =>
-      emit({ type: "retry", ...info })
-    );
+    const gptMessage = await chatCompletion(trimmedMessages, tools, {
+      onRetry: (info) => emit({ type: "retry", ...info }),
+      onReasoning: (text) => emit({ type: "reasoning", text }),
+    });
 
     if (!gptMessage) {
       throw new Error("OmniRoute returned an empty response");
