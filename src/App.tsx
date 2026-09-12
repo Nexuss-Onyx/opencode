@@ -460,9 +460,6 @@ export default function App() {
                 <div className="flex flex-col gap-4 min-h-[300px]">
                   <div className="flex items-start">
                     <div className="flex items-center gap-2.5 rounded-xl border border-[#222] bg-[#141414] px-4 py-2.5 shadow-lg shadow-black/40">
-                      <div className="relative flex items-center justify-center w-4 h-4">
-                        <span className="thinking-spinner" />
-                      </div>
                       <div className="flex items-center gap-[3px]">
                         <span className="thinking-dot" />
                         <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
@@ -471,9 +468,7 @@ export default function App() {
                       <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400">Thinking</span>
                     </div>
                   </div>
-                  <div className="flex-1 min-h-[180px] rounded-xl border border-dashed border-[#232323] bg-[#101010]/70">
-                    <span className="sr-only">Awaiting AI response…</span>
-                  </div>
+                  <div className="flex-1 min-h-[180px]" />
                 </div>
               )}
             </div>
