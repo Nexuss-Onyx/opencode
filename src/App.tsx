@@ -97,7 +97,7 @@ export default function App() {
     const el = messagesContainerRef.current;
     if (el) {
       requestAnimationFrame(() => {
-        el.scrollTo({ top: Math.max(0, el.scrollHeight - el.clientHeight - 170), behavior: "smooth" });
+        el.scrollTo({ top: Math.max(0, el.scrollHeight - el.clientHeight - 320), behavior: "smooth" });
       });
     }
   }, [activeSessionId]);
