@@ -388,7 +388,23 @@ function truncate(s: string, max: number = MAX_TOOL_RESULT_CHARS): string {
   return s.slice(0, max) + `\n...[truncated ${s.length - max} chars]`;
 }
 
-// Helper to execute bash command
+// Path containment guard — every file tool must stay inside the project workspace.
+// Returns the resolved absolute path when inside, otherwise null.
+function resolveInside(base: string, target: string): string | null {
+  const baseAbs = path.resolve(base);
+  const abs = path.resolve(baseAbs, target || ".");
+  const rel = path.relative(baseAbs, abs);
+  if (rel === "" || (!rel.startsWith("..") && rel !== ".." && !path.isAbsolute(rel))) {
+    return abs;
+  }
+  return null;
+}
+
+// Blocks commands that clearly escape the workspace (touch /, sudo, rm -rf /, cd /).
+const BASH_ESCAPE_RE =
+  /(^|[\s;|&])cd\s+\/\s*([;|&]|$)|(\s|^)sudo\s|rm\s+-rf?\s+(\/\s*([;|&]|$)|\/)/i;
+
+// Helper to execute bash command (restricted to the workspace via cwd + guard)
 async function runBash(command: string, timeoutMs: number = 120000, workdir: string = process.cwd()) {
   try {
     const { stdout, stderr } = await execAsync(command, { timeout: timeoutMs, cwd: workdir });
@@ -547,8 +563,13 @@ let systemInstruction = "";
 app.post("/api/mkdir", async (req, res) => {
   try {
     const { path: dirPath } = req.body;
-    await fs.mkdir(dirPath, { recursive: true });
-    res.json({ success: true });
+    const abs = resolveInside(process.cwd(), dirPath);
+    if (!abs) {
+      res.status(400).json({ error: `Path "${dirPath}" is outside the workspace` });
+      return;
+    }
+    await fs.mkdir(abs, { recursive: true });
+    res.json({ success: true, path: abs });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -557,8 +578,13 @@ app.post("/api/mkdir", async (req, res) => {
 app.delete("/api/rmdir", async (req, res) => {
   try {
     const { path: dirPath } = req.body;
-    await fs.rm(dirPath, { recursive: true, force: true });
-    res.json({ success: true });
+    const abs = resolveInside(process.cwd(), dirPath);
+    if (!abs) {
+      res.status(400).json({ error: `Path "${dirPath}" is outside the workspace` });
+      return;
+    }
+    await fs.rm(abs, { recursive: true, force: true });
+    res.json({ success: true, path: abs });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -641,42 +667,71 @@ app.post("/api/chat", async (req, res) => {
         try {
           const args = fc.args as any;
           if (fc.name === "bash") {
-            result = await runBash(args.command, args.timeout, args.workdir || projectCwd);
-          } else if (fc.name === "read") {
-            const targetPath = path.resolve(projectCwd, args.filePath);
-            const content = await fs.readFile(targetPath, "utf8");
-            const lines = content.split('\n');
-            const offset = args.offset ? args.offset - 1 : 0;
-            const limit = args.limit || 2000;
-            const slice = lines.slice(offset, offset + limit);
-            result = slice.map((line, i) => `${offset + i + 1}: ${line}`).join('\n');
-          } else if (fc.name === "write") {
-            const targetPath = path.resolve(projectCwd, args.filePath);
-            await fs.writeFile(targetPath, args.content, "utf8");
-            result = `File written to ${targetPath}`;
-          } else if (fc.name === "edit") {
-            const targetPath = path.resolve(projectCwd, args.filePath);
-            const content = await fs.readFile(targetPath, "utf8");
-            if (content.includes(args.oldString)) {
-              let newContent = content;
-              if (args.replaceAll) {
-                newContent = content.split(args.oldString).join(args.newString);
-              } else {
-                newContent = content.replace(args.oldString, args.newString);
-              }
-              await fs.writeFile(targetPath, newContent, "utf8");
-              result = "Edit successful";
+            if (BASH_ESCAPE_RE.test(args.command || "")) {
+              result = "Error: command blocked — bash cannot touch paths outside the workspace (no cd /, sudo, or rm -rf /)";
             } else {
-              result = "oldString not found in content";
+              const wd = resolveInside(projectCwd, args.workdir || ".");
+              if (!wd) {
+                result = `Error: workdir "${args.workdir}" is outside the workspace`;
+              } else {
+                result = await runBash(args.command, args.timeout, wd);
+              }
+            }
+          } else if (fc.name === "read") {
+            const targetPath = resolveInside(projectCwd, args.filePath);
+            if (!targetPath) {
+              result = `Error: path "${args.filePath}" is outside the workspace`;
+            } else {
+              const content = await fs.readFile(targetPath, "utf8");
+              const lines = content.split('\n');
+              const offset = args.offset ? args.offset - 1 : 0;
+              const limit = args.limit || 2000;
+              const slice = lines.slice(offset, offset + limit);
+              result = slice.map((line, i) => `${offset + i + 1}: ${line}`).join('\n');
+            }
+          } else if (fc.name === "write") {
+            const targetPath = resolveInside(projectCwd, args.filePath);
+            if (!targetPath) {
+              result = `Error: path "${args.filePath}" is outside the workspace`;
+            } else {
+              await fs.writeFile(targetPath, args.content, "utf8");
+              result = `File written to ${targetPath} (workspace-restricted)`;
+            }
+          } else if (fc.name === "edit") {
+            const targetPath = resolveInside(projectCwd, args.filePath);
+            if (!targetPath) {
+              result = `Error: path "${args.filePath}" is outside the workspace`;
+            } else {
+              const content = await fs.readFile(targetPath, "utf8");
+              if (content.includes(args.oldString)) {
+                let newContent = content;
+                if (args.replaceAll) {
+                  newContent = content.split(args.oldString).join(args.newString);
+                } else {
+                  newContent = content.replace(args.oldString, args.newString);
+                }
+                await fs.writeFile(targetPath, newContent, "utf8");
+                result = "Edit successful";
+              } else {
+                result = "oldString not found in content";
+              }
             }
           } else if (fc.name === "glob") {
-            const matches = await globModule(args.pattern, { cwd: args.path || projectCwd });
-            result = matches.join('\n') || "No matches found";
+            const searchCwd = resolveInside(projectCwd, args.path || ".");
+            if (!searchCwd) {
+              result = `Error: path "${args.path}" is outside the workspace`;
+            } else {
+              const matches = await globModule(args.pattern, { cwd: searchCwd });
+              result = matches.join('\n') || "No matches found";
+            }
           } else if (fc.name === "grep") {
-             // simplified grep
-             const searchCwd = args.path || projectCwd;
-             const cmd = `grep -nE "${args.pattern}" -r ${searchCwd}`;
-             result = await runBash(cmd);
+             const searchCwd = resolveInside(projectCwd, args.path || ".");
+             if (!searchCwd) {
+               result = `Error: path "${args.path}" is outside the workspace`;
+             } else {
+               const cmd = `grep -nE "${args.pattern}" -r "${searchCwd}"`;
+               result = await runBash(cmd);
+             }
           } else if (fc.name === "question") {
              result = "User questions are not supported in UI mode yet. Defaulting to empty answers.";
           } else if (fc.name === "skill") {
