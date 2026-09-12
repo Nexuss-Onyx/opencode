@@ -39,7 +39,7 @@ function isRetryable(status: number, message: string): boolean {
 }
 
 // OpenAI-compatible chat completion against the OmniRoute gateway
-async function chatCompletion(messages: any[], openaiTools: any[]) {
+async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (info: any) => void) {
   const body: any = {
     model: OMNIROUTE_MODEL,
     messages,
@@ -101,6 +101,14 @@ async function chatCompletion(messages: any[], openaiTools: any[]) {
           delayMs / 1000
         )}s — ${lastError?.message ?? "transient failure"}`
       );
+      if (onRetry) {
+        onRetry({
+          attempt: attempt + 1,
+          total: RETRY_DELAYS_MS.length,
+          delayMs,
+          error: lastError?.message ?? "transient failure",
+        });
+      }
       await sleep(delayMs);
     }
   }
@@ -358,16 +366,42 @@ app.post("/api/chat", async (req, res) => {
       parts: m.parts || [{ text: m.content }]
     }));
 
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.flushHeaders();
+    const emit = (obj: any) => {
+      try {
+        res.write(JSON.stringify(obj) + "\n");
+      } catch {
+        /* client closed */
+      }
+    };
+
     const openaiMessages: any[] = [];
     if (systemInstruction) {
       openaiMessages.push({ role: "system", content: systemInstruction });
     }
     openaiMessages.push(...toOpenAIMessages(formattedMessages));
 
-    const gptMessage = await chatCompletion(openaiMessages, tools);
+    const gptMessage = await chatCompletion(openaiMessages, tools, (info) =>
+      emit({ type: "retry", ...info })
+    );
 
     if (!gptMessage) {
       throw new Error("OmniRoute returned an empty response");
+    }
+
+    const reasoningText = String(
+      gptMessage.reasoning ||
+        gptMessage.reasoning_details?.[0]?.text ||
+        (Array.isArray(gptMessage.reasoning_details) &&
+          gptMessage.reasoning_details
+            .map((r: any) => r.text || "")
+            .filter(Boolean)
+            .join("\n")) ||
+        ""
+    );
+    if (reasoningText) {
+      emit({ type: "reasoning", text: reasoningText });
     }
 
     const responseMessage = toClientMessage(gptMessage);
@@ -464,18 +498,28 @@ app.post("/api/chat", async (req, res) => {
 
       // Return both the model's function calls and the results back to the client
       // so the client can append them to the chat history and make another request.
-      res.json({
+      emit({
         type: "function_calls",
         message: responseMessage,
         functionResponses: { role: "user", parts: functionResponses }
       });
+      res.end();
       return;
     }
 
-    res.json({ type: "text", message: responseMessage });
+    emit({ type: "text", message: responseMessage });
+    res.end();
   } catch (error: any) {
     console.error("API error", error);
-    res.status(500).json({ error: error.message });
+    if (res.headersSent) {
+      try {
+        res.end(JSON.stringify({ type: "error", error: error.message }) + "\n");
+      } catch {
+        res.end();
+      }
+    } else {
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 

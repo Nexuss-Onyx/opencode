@@ -53,6 +53,8 @@ export default function App() {
   const [isThinking, setIsThinking] = useState(false);
   const [isOffline, setIsOffline] = useState(() => typeof navigator !== "undefined" && !navigator.onLine);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [retryInfo, setRetryInfo] = useState<{ attempt: number; total: number; delayMs: number; error: string } | null>(null);
+  const [reasoningText, setReasoningText] = useState<string>("");
   const isThinkingRef = useRef(isThinking);
   const pendingSessionRef = useRef<{ session: Session; cwd: string } | null>(null);
   
@@ -261,6 +263,8 @@ export default function App() {
     const cwd = cwdOverride || activeProject.path;
     let currentMessages = [...session.messages];
     let keepGoing = true;
+    setRetryInfo(null);
+    setReasoningText("");
 
     while (keepGoing) {
       let res: Response;
@@ -277,14 +281,59 @@ export default function App() {
         pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
         return;
       }
-      
-      const data = await res.json();
-      
+
       if (!res.ok) {
-        currentMessages.push({ role: "model", parts: [{ text: `Error: ${data.error || "Unknown error"}` }] });
+        let errMsg = "";
+        try {
+          const errData = await res.json();
+          errMsg = errData.error || "Unknown error";
+        } catch {
+          errMsg = `HTTP ${res.status}`;
+        }
+        currentMessages.push({ role: "model", parts: [{ text: `Error: ${errMsg}` }] });
         setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
         break;
       }
+
+      // NDJSON event stream: read retry/reasoning progress, then the final payload
+      let data: any = null;
+      const reader = res.body?.getReader();
+      if (!reader) break;
+      const decoder = new TextDecoder();
+      let buffer = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            if (!line) continue;
+            let evt: any;
+            try { evt = JSON.parse(line); } catch { continue; }
+            if (evt.type === "retry") {
+              setRetryInfo({ attempt: evt.attempt, total: evt.total, delayMs: evt.delayMs, error: evt.error });
+            } else if (evt.type === "reasoning") {
+              setReasoningText(evt.text);
+            } else if (evt.type === "function_calls" || evt.type === "text") {
+              data = evt;
+            } else if (evt.type === "error") {
+              currentMessages.push({ role: "model", parts: [{ text: `Error: ${evt.error}` }] });
+              setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
+              keepGoing = false;
+            }
+          }
+        }
+      } catch (e) {
+        setIsOffline(true);
+        setIsReconnecting(true);
+        pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
+        return;
+      }
+
+      if (!data) break;
 
       if (data.type === "function_calls") {
         currentMessages.push(data.message);
@@ -458,15 +507,27 @@ export default function App() {
               )})}
               {isThinking && (
                 <div className="flex flex-col gap-4 min-h-[300px]">
-                  <div className="flex items-start">
+                  <div className="flex flex-col gap-2 items-start">
                     <div className="flex items-center gap-2.5 rounded-xl border border-[#222] bg-[#141414] px-4 py-2.5 shadow-lg shadow-black/40">
+                      <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400">Thinking</span>
                       <div className="flex items-center gap-[3px]">
                         <span className="thinking-dot" />
                         <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
                         <span className="thinking-dot" style={{ animationDelay: "0.3s" }} />
                       </div>
-                      <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400">Thinking</span>
                     </div>
+                    {retryInfo && (
+                      <div className="flex items-center gap-2 text-[12px] text-amber-300/90 px-1">
+                        <span>Retrying {retryInfo.attempt}/{retryInfo.total} in {Math.round(retryInfo.delayMs / 1000)}s</span>
+                        <span className="text-gray-600">·</span>
+                        <span className="text-gray-500 truncate max-w-[60vw]">{retryInfo.error}</span>
+                      </div>
+                    )}
+                    {reasoningText && !retryInfo && (
+                      <div className="text-[12px] text-gray-500 italic px-1 line-clamp-3 max-w-[70vw]">
+                        {reasoningText}
+                      </div>
+                    )}
                   </div>
                   <div className="flex-1 min-h-[180px]" />
                 </div>
