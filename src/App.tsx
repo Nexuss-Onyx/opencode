@@ -51,6 +51,10 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState(projectSessions[0]?.id);
   const [inputValue, setInputValue] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+  const [isOffline, setIsOffline] = useState(() => typeof navigator !== "undefined" && !navigator.onLine);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const isThinkingRef = useRef(isThinking);
+  const pendingSessionRef = useRef<{ session: Session; cwd: string } | null>(null);
   
   // Custom dialog state for iframe safety
   const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
@@ -87,6 +91,36 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeSession?.messages, isThinking]);
+
+  useEffect(() => {
+    isThinkingRef.current = isThinking;
+    if (!isThinking && !pendingSessionRef.current) setIsReconnecting(false);
+  }, [isThinking]);
+
+  useEffect(() => {
+    const goOnline = () => {
+      setIsOffline(false);
+      const pending = pendingSessionRef.current;
+      if (pending) {
+        pendingSessionRef.current = null;
+        setIsReconnecting(false);
+        setIsThinking(true);
+        processChat(pending.session, pending.cwd).catch((e) => console.error(e));
+      } else {
+        setIsReconnecting(false);
+      }
+    };
+    const goOffline = () => {
+      setIsOffline(true);
+      if (isThinkingRef.current) setIsReconnecting(true);
+    };
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
   const handleNewSession = () => {
     const newSession = { id: uuidv4(), title: "New session", messages: [], projectId: activeProjectId };
@@ -187,8 +221,15 @@ export default function App() {
     setInputValue("");
     setIsThinking(true);
 
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setIsOffline(true);
+      setIsReconnecting(true);
+      pendingSessionRef.current = { session: currentSession, cwd: activeProject.path };
+      return;
+    }
+
     try {
-      await processChat(currentSession);
+      await processChat(currentSession, activeProject.path);
     } catch (e) {
       console.error(e);
     } finally {
@@ -196,16 +237,26 @@ export default function App() {
     }
   };
 
-  const processChat = async (session: Session) => {
+  const processChat = async (session: Session, cwdOverride?: string) => {
+    const cwd = cwdOverride || activeProject.path;
     let currentMessages = [...session.messages];
     let keepGoing = true;
 
     while (keepGoing) {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: currentMessages, cwd: activeProject.path })
-      });
+      let res: Response;
+      try {
+        res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: currentMessages, cwd })
+        });
+      } catch (e) {
+        // Network dropped mid-request — queue for reconnect, show immediate feedback
+        setIsOffline(true);
+        setIsReconnecting(true);
+        pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
+        return;
+      }
       
       const data = await res.json();
       
@@ -317,6 +368,32 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Offline / reconnecting banner */}
+      {isOffline && (
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-[90] flex items-center gap-3 rounded-xl border border-amber-900/40 bg-[#1c160c]/95 px-4 py-2.5 shadow-2xl shadow-black/60 backdrop-blur">
+          <div className="relative flex items-center justify-center w-4 h-4">
+            <span
+              className="thinking-spinner"
+              style={{ borderColor: "rgba(245,158,11,0.25)", borderTopColor: "#f59e0b" }}
+            />
+          </div>
+          <div className="flex items-center gap-[3px]">
+            <span className="thinking-dot" style={{ background: "#f59e0b" }} />
+            <span className="thinking-dot" style={{ background: "#f59e0b", animationDelay: "0.15s" }} />
+            <span className="thinking-dot" style={{ background: "#f59e0b", animationDelay: "0.3s" }} />
+          </div>
+          {isReconnecting ? (
+            <span className="text-[13px] font-medium text-amber-300">
+              Connection lost — turn on your internet. Reconnecting…
+            </span>
+          ) : (
+            <span className="text-[13px] font-medium text-amber-300">
+              You're offline — reconnecting…
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col relative overflow-hidden">
