@@ -40,8 +40,6 @@ function isRetryable(status: number, message: string): boolean {
 
 // OpenAI-compatible chat completion against the OmniRoute gateway
 async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (info: any) => void) {
-  let toolsEnabled = openaiTools.length > 0;
-
   let lastError: any = null;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     const body: any = {
@@ -50,7 +48,7 @@ async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (in
       temperature: 0.7,
       max_tokens: 800,
     };
-    if (toolsEnabled) {
+    if (openaiTools.length > 0) {
       body.tools = openaiTools;
     }
 
@@ -88,27 +86,6 @@ async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (in
       ) {
         console.error(`OmniRoute permanent error (code=${code || res.status}) — aborting`);
         break;
-      }
-
-      // A provider-specific payload rejection: retryable because auto re-routes.
-      // After a couple of failed attempts, drop tools and try again plain.
-      if (
-        toolsEnabled &&
-        attempt >= 1 &&
-        /payload|rejected the request|tools?|bad_request/i.test(code + " " + upstream)
-      ) {
-        toolsEnabled = false;
-        console.error(`OmniRoute payload rejected — retrying without tools`);
-        if (onRetry) {
-          onRetry({
-            attempt: attempt + 1,
-            total: RETRY_DELAYS_MS.length,
-            delayMs: RETRY_DELAYS_MS[attempt] ?? 1000,
-            error: "provider rejected payload, retrying without tools",
-          });
-        }
-        await sleep(RETRY_DELAYS_MS[attempt] ?? 1000);
-        continue;
       }
 
       if (!isRetryable(res.status, upstream)) break;
@@ -196,11 +173,111 @@ function toOpenAIMessages(messages: any[]): any[] {
   return out;
 }
 
+// Detect text-formatted tool calls (opencode <tool_call> XML) when no native tool_calls exist.
+function isTextToolCallContent(content: string): boolean {
+  if (!content) return false;
+  return (
+    /<tool_call>/i.test(content) ||
+    /<parameter\s+name=[^>]+>/i.test(content) ||
+    /<parameter=\w+>/i.test(content) ||
+    /<bash>|<glob>|<grep[^>]*>|<read\b[^>]*>|<write\b[^>]*>|<edit\b[^>]*>|<task\b[^>]*>|<webfetch\b[^>]*>/i.test(content)
+  );
+}
+
+// parseTextToolCalls interprets the opencode XML tool-call forms and returns
+// [{ name, args }] compatible with the native functionCall path.
+function parseTextToolCalls(content: string): { name: string; args: any }[] {
+  const calls: { name: string; args: any }[] = [];
+  if (!content) return calls;
+
+  const toolBlocks = content.match(/<tool_call>([\s\S]*?)<\/tool_call>/gi) || [];
+  if (toolBlocks.length > 0) {
+    for (const block of toolBlocks) {
+      const fnMatch = block.match(/<function=([A-Za-z0-9_]+)\b/);
+      const name = fnMatch ? fnMatch[1] : null;
+      if (!name) continue;
+      const args: any = {};
+      const openRe = /<parameter\s*\b([^>]*)>/gi;
+      let om: RegExpExecArray | null;
+      while ((om = openRe.exec(block))) {
+        const attrs = om[1];
+        let keyMatch =
+          attrs.match(/(?:required|name)\s*=\s*["']?([\w .-]+)["']?/i) ||
+          attrs.match(/=\s*"?([\w .-]+)"?/i);
+        if (!keyMatch) continue;
+        const key = keyMatch[1].trim();
+        const closeIdx = block.indexOf("</parameter>", om.index);
+        if (closeIdx === -1) continue;
+        const value = block.slice(om.index + om[0].length, closeIdx).trim();
+        args[key] = value;
+        om.lastIndex = closeIdx + "</parameter>".length;
+      }
+      calls.push({ name, args });
+    }
+    return calls;
+  }
+
+  // Self-closing shorthand: <read filePath="/abs/path" />, <edit filePath=".." oldString=".." />
+  const selfClosing = /<([A-Za-z][A-Za-z0-9_]*)((?:\s+[\w-]+="[^"]*")*)\s*\/>/gi;
+  let sc: RegExpExecArray | null;
+  while ((sc = selfClosing.exec(content))) {
+    const name = sc[1];
+    const args: any = {};
+    const attrRe = /([\w-]+)="([^"]*)"/g;
+    let am: RegExpExecArray | null;
+    while ((am = attrRe.exec(sc[2]))) args[am[1]] = am[2];
+    if (Object.keys(args).length > 0) calls.push({ name, args });
+  }
+
+  // Paired shorthand: <bash>cmd</bash>, <edit filePath="x" oldString="a">b</edit>
+  const shorthand = /<([A-Za-z][A-Za-z0-9_]*)((?:\s+[\w-]+="[^"]*")*)>([\s\S]*?)<\/\1>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = shorthand.exec(content))) {
+    const name = m[1];
+    const attrs = m[2] || "";
+    const body = (m[3] || "").trim();
+    if (!attrs && !body) continue;
+    const args: any = {};
+    const attrRe = /([\w-]+)="([^"]*)"/g;
+    let am: RegExpExecArray | null;
+    while ((am = attrRe.exec(attrs))) args[am[1]] = am[2];
+    if (body) {
+      if (name === "bash" || name === "grep") args.command = args.command ?? body;
+      else if (name === "glob") args.pattern = args.pattern ?? body;
+      else if (name === "read") args.filePath = args.filePath ?? body;
+      else if (name === "webfetch") args.url = args.url ?? body;
+      else args.content = args.content ?? body;
+    }
+    calls.push({ name, args });
+  }
+  return calls;
+}
+
 // Convert an OpenAI assistant message back into the client's parts format
 function toClientMessage(gptMessage: any) {
   const parts: any[] = [];
-  if (gptMessage?.content) parts.push({ text: gptMessage.content });
-  for (const tc of gptMessage?.tool_calls || []) {
+  const content = gptMessage?.content || "";
+  const calls = gptMessage?.tool_calls || [];
+  const textCalls = calls.length === 0 ? parseTextToolCalls(content) : [];
+
+  if (textCalls.length > 0) {
+    for (const tc of textCalls) {
+      parts.push({ functionCall: { name: tc.name, args: tc.args } });
+    }
+    const cleanBlocks = content
+      .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+      .replace(/<function=[A-Za-z0-9_]+>[\s\S]*?<\/function>/gi, "")
+      .replace(/<parameter(?:\s+required=|name=|=)(["']?)[\w .-]+\1>[\s\S]*?<\/parameter>/gi, "")
+      .replace(/<([A-Za-z][A-Za-z0-9_]*)((?:\s+[\w-]+="[^"]*")*)\s*\/>/gi, "")
+      .replace(/<([A-Za-z][A-Za-z0-9_]*)((?:\s+[\w-]+="[^"]*")*)>[\s\S]*?<\/\1>/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (cleanBlocks) parts.unshift({ text: cleanBlocks });
+    return { role: "model", parts };
+  }
+
+  if (content) parts.push({ text: content });
+  for (const tc of calls) {
     let args: any = {};
     try {
       args = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
@@ -217,14 +294,44 @@ app.use(express.json({ limit: "50mb" }));
 
 const PORT = 3000;
 
+const MAX_TOOL_RESULT_CHARS = 30000;
+const MAX_PAYLOAD_BYTES = 30000;
+
+// Truncate long tool/results output so histories stay within provider context.
+function truncate(s: string, max: number = MAX_TOOL_RESULT_CHARS): string {
+  if (!s || s.length <= max) return s;
+  return s.slice(0, max) + `\n...[truncated ${s.length - max} chars]`;
+}
+
 // Helper to execute bash command
 async function runBash(command: string, timeoutMs: number = 120000, workdir: string = process.cwd()) {
   try {
     const { stdout, stderr } = await execAsync(command, { timeout: timeoutMs, cwd: workdir });
-    return `Stdout:\n${stdout}\nStderr:\n${stderr}`;
+    return `Stdout:\n${truncate(stdout)}\nStderr:\n${truncate(stderr)}`;
   } catch (error: any) {
-    return `Error executing command: ${error.message}\nStdout:\n${error.stdout}\nStderr:\n${error.stderr}`;
+    return `Error executing command: ${error.message}\nStdout:\n${truncate(error.stdout || "")}\nStderr:\n${truncate(error.stderr || "")}`;
   }
+}
+
+// Trim the oldest messages so the total payload stays within a provider-friendly
+// byte budget. The system message (index 0) is always preserved, and assistant
+// tool_calls + their follow-up tool messages are removed as whole units.
+function trimMessagesToFit(msgs: any[], maxBytes: number = MAX_PAYLOAD_BYTES): any[] {
+  let total = JSON.stringify(msgs).length;
+  if (total <= maxBytes) return msgs;
+  const kept = [...msgs];
+  let i = 1; // keep index 0 (system)
+  while (i < kept.length && total > maxBytes) {
+    const m = kept[i];
+    let cut = 1;
+    if (m.role === "assistant" && m.tool_calls) {
+      while (i + cut < kept.length && kept[i + cut].role === "tool") cut++;
+    }
+    if (i + cut >= kept.length && kept.length <= 2) break; // never empty a session
+    kept.splice(i, cut);
+    total = JSON.stringify(kept).length;
+  }
+  return kept;
 }
 
 // Tool definitions (OpenAI function-call schema for OmniRoute)
@@ -405,7 +512,14 @@ app.post("/api/chat", async (req, res) => {
     }
     openaiMessages.push(...toOpenAIMessages(formattedMessages));
 
-    const gptMessage = await chatCompletion(openaiMessages, tools, (info) =>
+    const trimmedMessages = trimMessagesToFit(openaiMessages);
+    if (trimmedMessages.length !== openaiMessages.length) {
+      console.error(
+        `Trimmed history from ${openaiMessages.length} to ${trimmedMessages.length} messages (${JSON.stringify(openaiMessages).length} -> ${JSON.stringify(trimmedMessages).length} bytes)`
+      );
+    }
+
+    const gptMessage = await chatCompletion(trimmedMessages, tools, (info) =>
       emit({ type: "retry", ...info })
     );
 
@@ -495,12 +609,12 @@ app.post("/api/chat", async (req, res) => {
                 const html = await fetchRes.text();
 
                 if (args.format === "html") {
-                  result = html.substring(0, 50000); // limit size
+                  result = html.substring(0, MAX_TOOL_RESULT_CHARS);
                 } else {
                   // default markdown/text fallback
                   const $ = cheerio.load(html);
                   $('script, style, nav, footer').remove();
-                  result = $.text().replace(/\s+/g, ' ').trim().substring(0, 50000);
+                  result = $.text().replace(/\s+/g, ' ').trim().substring(0, MAX_TOOL_RESULT_CHARS);
                 }
              } catch (e: any) {
                 result = `Error fetching URL: ${e.message}`;
