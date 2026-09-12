@@ -225,7 +225,11 @@ export default function App() {
     setSessions(prev => prev.map(s => s.id === currentSession.id ? currentSession : s));
     setInputValue("");
     setIsThinking(true);
-    messagesContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+
+    const scroller = messagesContainerRef.current;
+    if (scroller && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 120) {
+      scroller.scrollTo({ top: 0, behavior: "smooth" });
+    }
 
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       setIsOffline(true);
