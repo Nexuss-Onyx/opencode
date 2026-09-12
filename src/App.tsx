@@ -15,7 +15,6 @@ import {
   ArrowUp, 
   GitBranch, 
   Folder,
-  SquareSquare, // fake icon for model
   Loader2,
   StopCircle
 } from "lucide-react";
@@ -392,15 +391,9 @@ export default function App() {
               rows={1}
             />
             <div className="flex items-center justify-between px-3 pb-3">
-              <div className="flex items-center gap-3">
-                <button className="text-gray-500 hover:text-gray-300 transition-colors p-1">
-                  <Plus size={20} />
-                </button>
-                <div className="flex items-center gap-1.5 text-xs text-gray-400 bg-[#222] hover:bg-[#2a2a2a] cursor-pointer transition-colors px-2.5 py-1.5 rounded-md">
-                  <SquareSquare size={14} />
-                  <span>OmniRoute Auto</span>
-                </div>
-              </div>
+              <button className="text-gray-500 hover:text-gray-300 transition-colors p-1">
+                <Plus size={20} />
+              </button>
               <button 
                 onClick={handleSend}
                 disabled={!inputValue.trim() || isThinking}
