@@ -97,7 +97,7 @@ export default function App() {
     const el = messagesContainerRef.current;
     if (el) {
       requestAnimationFrame(() => {
-        el.scrollTo({ top: Math.max(0, el.scrollHeight - el.clientHeight - 320), behavior: "smooth" });
+        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
       });
     }
   }, [activeSessionId]);
@@ -410,7 +410,7 @@ export default function App() {
             </h1>
           </div>
         ) : (
-          <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 md:px-24 py-8 pb-32">
+          <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 md:px-24 py-8 pb-64" style={{ scrollPaddingBottom: "16rem" }}>
             <div className="max-w-3xl mx-auto flex flex-col gap-6">
               {activeSession.messages.map((msg, i) => {
                 if (!msg) return null;
