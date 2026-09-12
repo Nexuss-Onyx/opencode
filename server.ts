@@ -70,8 +70,25 @@ async function chatCompletion(messages: any[], openaiTools: any[]) {
         return data.choices?.[0]?.message ?? null;
       }
       const text = await res.text();
-      lastError = new Error(`OmniRoute API error ${res.status}: ${text.slice(0, 500)}`);
-      if (!isRetryable(res.status, text)) break;
+      let body: any = null;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = null;
+      }
+      const code = String(body?.error?.code || body?.code || "").toLowerCase();
+      const msg = String(body?.error?.message || body?.message || text);
+      lastError = new Error(`OmniRoute API error ${res.status}: ${msg.slice(0, 500)}`);
+      // Permanent rejection (bad request / invalid payload): retrying will never help.
+      const looksPermanent =
+        /bad_request|bad gateway|invalid|payload|not.?supported|unsupported|unexpected field|too large|exceed/i.test(
+          code + " " + msg
+        ) && !/quota|overload|rate|timeout|429/i.test(code + " " + msg);
+      if (looksPermanent) {
+        console.error(`OmniRoute rejected request (code=${code || res.status}) — aborting, not retrying`);
+        break;
+      }
+      if (!isRetryable(res.status, msg)) break;
     } catch (e: any) {
       lastError = e;
       if (!isRetryable(0, e?.message || "")) break;
@@ -132,9 +149,13 @@ function toOpenAIMessages(messages: any[]): any[] {
             },
           };
         });
-        out.push({ role: "assistant", content: text || null, tool_calls });
+        const assistantMsg: any = { role: "assistant", tool_calls };
+        if (text) assistantMsg.content = text;
+        out.push(assistantMsg);
       } else {
-        out.push({ role: "assistant", content: text || null });
+        const assistantMsg: any = { role: "assistant" };
+        if (text) assistantMsg.content = text;
+        out.push(assistantMsg);
       }
     } else if (m.role === "system") {
       const text = parts.filter((p: any) => p.text).map((p: any) => p.text).join("\n");
