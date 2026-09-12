@@ -7,7 +7,6 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { glob as globModule } from "glob";
 import * as cheerio from "cheerio";
-import fetch from "node-fetch";
 
 const execAsync = promisify(exec);
 
