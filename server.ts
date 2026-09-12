@@ -70,14 +70,14 @@ async function chatCompletion(messages: any[], openaiTools: any[]) {
         return data.choices?.[0]?.message ?? null;
       }
       const text = await res.text();
-      let body: any = null;
+      let json: any = null;
       try {
-        body = JSON.parse(text);
+        json = JSON.parse(text);
       } catch {
-        body = null;
+        json = null;
       }
-      const code = String(body?.error?.code || body?.code || "").toLowerCase();
-      const msg = String(body?.error?.message || body?.message || text);
+      const code = String(json?.error?.code || json?.code || "").toLowerCase();
+      const msg = String(json?.error?.message || json?.message || text);
       lastError = new Error(`OmniRoute API error ${res.status}: ${msg.slice(0, 500)}`);
       // Permanent rejection (bad request / invalid payload): retrying will never help.
       const looksPermanent =
