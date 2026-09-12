@@ -103,6 +103,16 @@ export default function App() {
   }, [activeSessionId]);
 
   useEffect(() => {
+    const msgs = activeSession?.messages;
+    if (!msgs?.length) return;
+    const last = msgs[msgs.length - 1];
+    if (last?.role !== "model" || !last.parts?.some((p: any) => p.text)) return;
+    if (last.parts?.some((p: any) => p.functionCall)) return;
+    const el = messagesContainerRef.current;
+    if (el) requestAnimationFrame(() => el.scrollTo({ top: el.scrollHeight, behavior: "smooth" }));
+  }, [activeSession?.messages]);
+
+  useEffect(() => {
     const goOnline = () => {
       setIsOffline(false);
       const pending = pendingSessionRef.current;
