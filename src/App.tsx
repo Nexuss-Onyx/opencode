@@ -237,8 +237,8 @@ export default function App() {
     setIsThinking(true);
 
     const scroller = messagesContainerRef.current;
-    if (scroller && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 120) {
-      scroller.scrollTo({ top: 0, behavior: "smooth" });
+    if (scroller) {
+      requestAnimationFrame(() => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" }));
     }
 
     if (typeof navigator !== "undefined" && !navigator.onLine) {
