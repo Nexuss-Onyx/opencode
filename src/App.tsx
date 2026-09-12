@@ -62,7 +62,7 @@ export default function App() {
   const [deleteProjectModalOpen, setDeleteProjectModalOpen] = useState<Project | null>(null);
 
   const activeSession = sessions.find(s => s.id === activeSessionId) || projectSessions[0] || sessions[0];
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     localStorage.setItem("opencode_projects", JSON.stringify(projects));
@@ -87,10 +87,6 @@ export default function App() {
       }
     }
   }, [activeProjectId, projectSessions, activeSessionId]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeSession?.messages, isThinking]);
 
   useEffect(() => {
     isThinkingRef.current = isThinking;
@@ -220,6 +216,7 @@ export default function App() {
     setSessions(prev => prev.map(s => s.id === currentSession.id ? currentSession : s));
     setInputValue("");
     setIsThinking(true);
+    messagesContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
 
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       setIsOffline(true);
@@ -404,7 +401,7 @@ export default function App() {
             </h1>
           </div>
         ) : (
-          <div className="flex-1 overflow-y-auto px-4 md:px-24 py-8 pb-32">
+          <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 md:px-24 py-8 pb-32">
             <div className="max-w-3xl mx-auto flex flex-col gap-6">
               {activeSession.messages.map((msg, i) => {
                 if (!msg) return null;
@@ -437,21 +434,25 @@ export default function App() {
                 </div>
               )})}
               {isThinking && (
-                <div className="flex items-start">
-                  <div className="flex items-center gap-2.5 rounded-xl border border-[#222] bg-[#141414] px-4 py-2.5 shadow-lg shadow-black/40">
-                    <div className="relative flex items-center justify-center w-4 h-4">
-                      <span className="thinking-spinner" />
+                <div className="flex flex-col gap-4 min-h-[300px]">
+                  <div className="flex items-start">
+                    <div className="flex items-center gap-2.5 rounded-xl border border-[#222] bg-[#141414] px-4 py-2.5 shadow-lg shadow-black/40">
+                      <div className="relative flex items-center justify-center w-4 h-4">
+                        <span className="thinking-spinner" />
+                      </div>
+                      <div className="flex items-center gap-[3px]">
+                        <span className="thinking-dot" />
+                        <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
+                        <span className="thinking-dot" style={{ animationDelay: "0.3s" }} />
+                      </div>
+                      <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400">Thinking</span>
                     </div>
-                    <div className="flex items-center gap-[3px]">
-                      <span className="thinking-dot" />
-                      <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
-                      <span className="thinking-dot" style={{ animationDelay: "0.3s" }} />
-                    </div>
-                    <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400">Thinking</span>
+                  </div>
+                  <div className="flex-1 min-h-[180px] rounded-xl border border-dashed border-[#232323] bg-[#101010]/70">
+                    <span className="sr-only">Awaiting AI response…</span>
                   </div>
                 </div>
               )}
-              <div ref={messagesEndRef} />
             </div>
           </div>
         )}
