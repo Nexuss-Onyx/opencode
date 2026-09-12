@@ -94,6 +94,15 @@ export default function App() {
   }, [isThinking]);
 
   useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (el) {
+      requestAnimationFrame(() => {
+        el.scrollTo({ top: Math.max(0, el.scrollHeight - el.clientHeight - 170), behavior: "smooth" });
+      });
+    }
+  }, [activeSessionId]);
+
+  useEffect(() => {
     const goOnline = () => {
       setIsOffline(false);
       const pending = pendingSessionRef.current;
