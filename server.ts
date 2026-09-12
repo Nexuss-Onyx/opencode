@@ -40,21 +40,20 @@ function isRetryable(status: number, message: string): boolean {
 
 // OpenAI-compatible chat completion against the OmniRoute gateway
 async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (info: any) => void) {
-  const body: any = {
-    model: OMNIROUTE_MODEL,
-    messages,
-    temperature: 0.7,
-    max_tokens: 800,
-  };
-  if (OMNIROUTE_MODEL === "auto") {
-    body.tool_choice = "auto";
-  }
-  if (openaiTools.length > 0) {
-    body.tools = openaiTools;
-  }
+  let toolsEnabled = openaiTools.length > 0;
 
   let lastError: any = null;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    const body: any = {
+      model: OMNIROUTE_MODEL,
+      messages,
+      temperature: 0.7,
+      max_tokens: 800,
+    };
+    if (toolsEnabled) {
+      body.tools = openaiTools;
+    }
+
     try {
       const res = await fetch(`${OMNIROUTE_API_BASE}/chat/completions`, {
         method: "POST",
@@ -77,18 +76,42 @@ async function chatCompletion(messages: any[], openaiTools: any[], onRetry?: (in
         json = null;
       }
       const code = String(json?.error?.code || json?.code || "").toLowerCase();
-      const msg = String(json?.error?.message || json?.message || text);
-      lastError = new Error(`OmniRoute API error ${res.status}: ${msg.slice(0, 500)}`);
-      // Permanent rejection (bad request / invalid payload): retrying will never help.
-      const looksPermanent =
-        /bad_request|bad gateway|invalid|payload|not.?supported|unsupported|unexpected field|too large|exceed/i.test(
-          code + " " + msg
-        ) && !/quota|overload|rate|timeout|429/i.test(code + " " + msg);
-      if (looksPermanent) {
-        console.error(`OmniRoute rejected request (code=${code || res.status}) — aborting, not retrying`);
+      const upstream = String(json?.error?.message || json?.message || text);
+      const msg = `OmniRoute API error ${res.status}: ${upstream.slice(0, 500)}`;
+      lastError = new Error(msg);
+
+      // Only auth/unknown-model errors are truly permanent — abort immediately.
+      if (
+        /invalid_api_key|apikey|api.?key|unauthorized|forbidden|model.?not.?found|no such model|invalid model|not a model/i.test(
+          code + " " + upstream
+        )
+      ) {
+        console.error(`OmniRoute permanent error (code=${code || res.status}) — aborting`);
         break;
       }
-      if (!isRetryable(res.status, msg)) break;
+
+      // A provider-specific payload rejection: retryable because auto re-routes.
+      // After a couple of failed attempts, drop tools and try again plain.
+      if (
+        toolsEnabled &&
+        attempt >= 1 &&
+        /payload|rejected the request|tools?|bad_request/i.test(code + " " + upstream)
+      ) {
+        toolsEnabled = false;
+        console.error(`OmniRoute payload rejected — retrying without tools`);
+        if (onRetry) {
+          onRetry({
+            attempt: attempt + 1,
+            total: RETRY_DELAYS_MS.length,
+            delayMs: RETRY_DELAYS_MS[attempt] ?? 1000,
+            error: "provider rejected payload, retrying without tools",
+          });
+        }
+        await sleep(RETRY_DELAYS_MS[attempt] ?? 1000);
+        continue;
+      }
+
+      if (!isRetryable(res.status, upstream)) break;
     } catch (e: any) {
       lastError = e;
       if (!isRetryable(0, e?.message || "")) break;
