@@ -1,7 +1,7 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
 import fs from "fs/promises";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -11,7 +11,119 @@ import fetch from "node-fetch";
 
 const execAsync = promisify(exec);
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// OmniRoute gateway configuration
+const OMNIROUTE_API_BASE = normalizeBase(
+  process.env.OMNIROUTE_API_BASE || "https://omniouter-vercel.vercel.app"
+);
+const OMNIROUTE_API_KEY = process.env.OMNIROUTE_AI_API_KEY || "";
+const OMNIROUTE_MODEL = process.env.OMNIROUTE_MODEL || "auto";
+
+function normalizeBase(base: string): string {
+  let url = base.trim().replace(/\/+$/, "");
+  if (!/\/api\/v1$/i.test(url)) url += "/api/v1";
+  return url;
+}
+
+// OpenAI-compatible chat completion against the OmniRoute gateway
+async function chatCompletion(messages: any[], openaiTools: any[]) {
+  const body: any = {
+    model: OMNIROUTE_MODEL,
+    messages,
+    temperature: 0.7,
+    max_tokens: 800,
+  };
+  if (OMNIROUTE_MODEL === "auto") {
+    body.tool_choice = "auto";
+  }
+  if (openaiTools.length > 0) {
+    body.tools = openaiTools;
+  }
+  const res = await fetch(`${OMNIROUTE_API_BASE}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OMNIROUTE_API_KEY}`,
+      "x-api-key": OMNIROUTE_API_KEY,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`OmniRoute API error ${res.status}: ${text.slice(0, 500)}`);
+  }
+  const data: any = await res.json();
+  return data.choices?.[0]?.message ?? null;
+}
+
+// Convert the client's Gemini-style history (role + parts) into OpenAI messages
+function toOpenAIMessages(messages: any[]): any[] {
+  const out: any[] = [];
+  let pendingIds: string[] = [];
+  let seq = 0;
+  for (const m of messages) {
+    const parts = m.parts || [];
+    if (m.role === "user") {
+      const text = parts.filter((p: any) => p.text).map((p: any) => p.text).join("\n");
+      const responses = parts.filter((p: any) => p.functionResponse);
+      if (responses.length > 0) {
+        responses.forEach((p: any, i: number) => {
+          const id = pendingIds[i] || `call_${seq++}`;
+          const result = p.functionResponse?.response?.result;
+          const content =
+            typeof result === "string"
+              ? result
+              : JSON.stringify(p.functionResponse?.response ?? result ?? "");
+          out.push({ role: "tool", tool_call_id: id, content });
+        });
+        pendingIds = [];
+      } else if (text) {
+        out.push({ role: "user", content: text });
+      }
+    } else if (m.role === "model") {
+      const text = parts.filter((p: any) => p.text).map((p: any) => p.text).join("\n");
+      const calls = parts.filter((p: any) => p.functionCall);
+      if (calls.length > 0) {
+        const tool_calls = calls.map((p: any) => {
+          const id = `call_${seq++}`;
+          pendingIds.push(id);
+          const args = p.functionCall?.args;
+          return {
+            id,
+            type: "function",
+            function: {
+              name: p.functionCall?.name,
+              arguments:
+                typeof args === "string" ? args : JSON.stringify(args ?? {}),
+            },
+          };
+        });
+        out.push({ role: "assistant", content: text || null, tool_calls });
+      } else {
+        out.push({ role: "assistant", content: text || null });
+      }
+    } else if (m.role === "system") {
+      const text = parts.filter((p: any) => p.text).map((p: any) => p.text).join("\n");
+      out.push({ role: "system", content: text });
+    }
+  }
+  return out;
+}
+
+// Convert an OpenAI assistant message back into the client's parts format
+function toClientMessage(gptMessage: any) {
+  const parts: any[] = [];
+  if (gptMessage?.content) parts.push({ text: gptMessage.content });
+  for (const tc of gptMessage?.tool_calls || []) {
+    let args: any = {};
+    try {
+      args = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
+    } catch {
+      args = {};
+    }
+    parts.push({ functionCall: { name: tc.function?.name, args } });
+  }
+  return { role: "model", parts };
+}
 
 const app = express();
 app.use(express.json());
@@ -28,167 +140,127 @@ async function runBash(command: string, timeoutMs: number = 120000, workdir: str
   }
 }
 
-// Tool definitions for Gemini
+// Tool definitions (OpenAI function-call schema for OmniRoute)
+function fn(name: string, description: string, parameters: any) {
+  return { type: "function", function: { name, description, parameters } };
+}
+
 const tools = [
-  {
-    name: "bash",
-    description: "Executes a given bash command in a persistent shell session.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        command: { type: Type.STRING },
-        timeout: { type: Type.INTEGER, description: "Timeout in milliseconds" },
-        workdir: { type: Type.STRING, description: "Working directory" }
-      },
-      required: ["command"],
-    }
-  },
-  {
-    name: "edit",
-    description: "Performs exact string replacements in files.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        filePath: { type: Type.STRING },
-        oldString: { type: Type.STRING },
-        newString: { type: Type.STRING },
-        replaceAll: { type: Type.BOOLEAN }
-      },
-      required: ["filePath", "oldString", "newString"],
-    }
-  },
-  {
-    name: "glob",
-    description: "Fast file pattern matching tool.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        pattern: { type: Type.STRING },
-        path: { type: Type.STRING }
-      },
-      required: ["pattern"],
-    }
-  },
-  {
-    name: "grep",
-    description: "Fast content search tool.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        pattern: { type: Type.STRING },
-        path: { type: Type.STRING },
-        include: { type: Type.STRING }
-      },
-      required: ["pattern"],
-    }
-  },
-  {
-    name: "read",
-    description: "Read a file or directory from the local filesystem.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        filePath: { type: Type.STRING },
-        offset: { type: Type.INTEGER },
-        limit: { type: Type.INTEGER }
-      },
-      required: ["filePath"],
-    }
-  },
-  {
-    name: "write",
-    description: "Writes a file to the local filesystem.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        filePath: { type: Type.STRING },
-        content: { type: Type.STRING }
-      },
-      required: ["filePath", "content"],
-    }
-  },
-  {
-    name: "question",
-    description: "Use this tool when you need to ask the user questions during execution.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        questions: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              question: { type: Type.STRING },
-              header: { type: Type.STRING },
-              options: { type: Type.ARRAY, items: { type: Type.STRING } },
-              multiple: { type: Type.BOOLEAN }
-            }
+  fn("bash", "Executes a given bash command in a persistent shell session.", {
+    type: "object",
+    properties: {
+      command: { type: "string" },
+      timeout: { type: "integer", description: "Timeout in milliseconds" },
+      workdir: { type: "string", description: "Working directory" }
+    },
+    required: ["command"],
+  }),
+  fn("edit", "Performs exact string replacements in files.", {
+    type: "object",
+    properties: {
+      filePath: { type: "string" },
+      oldString: { type: "string" },
+      newString: { type: "string" },
+      replaceAll: { type: "boolean" }
+    },
+    required: ["filePath", "oldString", "newString"],
+  }),
+  fn("glob", "Fast file pattern matching tool.", {
+    type: "object",
+    properties: {
+      pattern: { type: "string" },
+      path: { type: "string" }
+    },
+    required: ["pattern"],
+  }),
+  fn("grep", "Fast content search tool.", {
+    type: "object",
+    properties: {
+      pattern: { type: "string" },
+      path: { type: "string" },
+      include: { type: "string" }
+    },
+    required: ["pattern"],
+  }),
+  fn("read", "Read a file or directory from the local filesystem.", {
+    type: "object",
+    properties: {
+      filePath: { type: "string" },
+      offset: { type: "integer" },
+      limit: { type: "integer" }
+    },
+    required: ["filePath"],
+  }),
+  fn("write", "Writes a file to the local filesystem.", {
+    type: "object",
+    properties: {
+      filePath: { type: "string" },
+      content: { type: "string" }
+    },
+    required: ["filePath", "content"],
+  }),
+  fn("question", "Use this tool when you need to ask the user questions during execution.", {
+    type: "object",
+    properties: {
+      questions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            question: { type: "string" },
+            header: { type: "string" },
+            options: { type: "array", items: { type: "string" } },
+            multiple: { type: "boolean" }
           }
         }
-      },
-      required: ["questions"],
-    }
-  },
-  {
-    name: "skill",
-    description: "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        name: { type: Type.STRING }
-      },
-      required: ["name"],
-    }
-  },
-  {
-    name: "task",
-    description: "Launch a new agent to handle complex, multistep tasks autonomously.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        description: { type: Type.STRING },
-        prompt: { type: Type.STRING },
-        subagent_type: { type: Type.STRING },
-        task_id: { type: Type.STRING },
-        command: { type: Type.STRING }
-      },
-      required: ["description", "prompt", "subagent_type"],
-    }
-  },
-  {
-    name: "todowrite",
-    description: "Create and maintain a structured task list for the current coding session.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        todos: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              content: { type: Type.STRING },
-              status: { type: Type.STRING },
-              priority: { type: Type.STRING }
-            }
+      }
+    },
+    required: ["questions"],
+  }),
+  fn("skill", "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.", {
+    type: "object",
+    properties: {
+      name: { type: "string" }
+    },
+    required: ["name"],
+  }),
+  fn("task", "Launch a new agent to handle complex, multistep tasks autonomously.", {
+    type: "object",
+    properties: {
+      description: { type: "string" },
+      prompt: { type: "string" },
+      subagent_type: { type: "string" },
+      task_id: { type: "string" },
+      command: { type: "string" }
+    },
+    required: ["description", "prompt", "subagent_type"],
+  }),
+  fn("todowrite", "Create and maintain a structured task list for the current coding session.", {
+    type: "object",
+    properties: {
+      todos: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            content: { type: "string" },
+            status: { type: "string" },
+            priority: { type: "string" }
           }
         }
-      },
-      required: ["todos"],
-    }
-  },
-  {
-    name: "webfetch",
-    description: "Fetches content from a specified URL.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        url: { type: Type.STRING },
-        format: { type: Type.STRING },
-        timeout: { type: Type.INTEGER }
-      },
-      required: ["url"],
-    }
-  }
+      }
+    },
+    required: ["todos"],
+  }),
+  fn("webfetch", "Fetches content from a specified URL.", {
+    type: "object",
+    properties: {
+      url: { type: "string" },
+      format: { type: "string" },
+      timeout: { type: "integer" }
+    },
+    required: ["url"],
+  })
 ];
 
 let systemInstruction = "";
@@ -230,25 +302,28 @@ app.post("/api/chat", async (req, res) => {
       parts: m.parts || [{ text: m.content }]
     }));
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: formattedMessages,
-      config: {
-        systemInstruction: systemInstruction,
-        tools: [{ functionDeclarations: tools }],
-      },
-    });
-    
-    // We handle function calls on the server
-    const responseMessage: any = {
-      role: "model",
-      parts: response.candidates?.[0]?.content?.parts || [{ text: response.text }]
-    };
+    const openaiMessages: any[] = [];
+    if (systemInstruction) {
+      openaiMessages.push({ role: "system", content: systemInstruction });
+    }
+    openaiMessages.push(...toOpenAIMessages(formattedMessages));
 
-    if (response.functionCalls?.length) {
+    const gptMessage = await chatCompletion(openaiMessages, tools);
+
+    if (!gptMessage) {
+      throw new Error("OmniRoute returned an empty response");
+    }
+
+    const responseMessage = toClientMessage(gptMessage);
+
+    // We handle function calls on the server
+    const functionCallParts = responseMessage.parts.filter((p: any) => p.functionCall);
+
+    if (functionCallParts.length > 0) {
       // Execute functions
       const functionResponses = [];
-      for (const fc of response.functionCalls) {
+      for (const fp of functionCallParts) {
+        const fc = fp.functionCall;
         let result = "";
         try {
           const args = fc.args as any;
@@ -302,10 +377,10 @@ app.post("/api/chat", async (req, res) => {
                 let urlStr = args.url;
                 if (urlStr.startsWith("http://")) urlStr = urlStr.replace("http://", "https://");
                 if (!urlStr.startsWith("https://")) urlStr = "https://" + urlStr;
-                
+
                 const fetchRes = await fetch(urlStr);
                 const html = await fetchRes.text();
-                
+
                 if (args.format === "html") {
                   result = html.substring(0, 50000); // limit size
                 } else {
@@ -330,7 +405,7 @@ app.post("/api/chat", async (req, res) => {
           }
         });
       }
-      
+
       // Return both the model's function calls and the results back to the client
       // so the client can append them to the chat history and make another request.
       res.json({

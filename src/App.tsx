@@ -398,7 +398,7 @@ export default function App() {
                 </button>
                 <div className="flex items-center gap-1.5 text-xs text-gray-400 bg-[#222] hover:bg-[#2a2a2a] cursor-pointer transition-colors px-2.5 py-1.5 rounded-md">
                   <SquareSquare size={14} />
-                  <span>MiMo V2.5 Free</span>
+                  <span>OmniRoute Auto</span>
                 </div>
               </div>
               <button 
