@@ -379,6 +379,13 @@ app.use(express.json({ limit: "50mb" }));
 
 const PORT = 3000;
 
+// Workspace root — every project (including the Default one) lives under here.
+// Override with OMNIROUTE_WORKSPACE_DIR if you want e.g. /workspace.
+const WORKSPACE_ROOT = path.resolve(
+  process.env.OMNIROUTE_WORKSPACE_DIR || path.join(process.cwd(), "workspace")
+);
+const DEFAULT_WORKSPACE = path.join(WORKSPACE_ROOT, "_default");
+
 const MAX_TOOL_RESULT_CHARS = 30000;
 const MAX_PAYLOAD_BYTES = 30000;
 
@@ -563,7 +570,7 @@ let systemInstruction = "";
 app.post("/api/mkdir", async (req, res) => {
   try {
     const { path: dirPath } = req.body;
-    const abs = resolveInside(process.cwd(), dirPath);
+    const abs = resolveInside(WORKSPACE_ROOT, path.resolve(process.cwd(), dirPath || ""));
     if (!abs) {
       res.status(400).json({ error: `Path "${dirPath}" is outside the workspace` });
       return;
@@ -578,7 +585,7 @@ app.post("/api/mkdir", async (req, res) => {
 app.delete("/api/rmdir", async (req, res) => {
   try {
     const { path: dirPath } = req.body;
-    const abs = resolveInside(process.cwd(), dirPath);
+    const abs = resolveInside(WORKSPACE_ROOT, path.resolve(process.cwd(), dirPath || ""));
     if (!abs) {
       res.status(400).json({ error: `Path "${dirPath}" is outside the workspace` });
       return;
@@ -592,7 +599,11 @@ app.delete("/api/rmdir", async (req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   const { messages, cwd } = req.body;
-  const projectCwd = cwd || process.cwd();
+  // Always resolve the project cwd inside the workspace root; client paths are
+  // relative to the app root (./workspace/<name>). Anything outside falls back
+  // to the default workspace folder.
+  const projectCwd =
+    resolveInside(WORKSPACE_ROOT, path.resolve(process.cwd(), cwd || "")) || DEFAULT_WORKSPACE;
   if (!systemInstruction) {
     try {
       systemInstruction = await fs.readFile(path.join(process.cwd(), "src/opencode.md"), "utf8");
@@ -802,6 +813,11 @@ app.post("/api/chat", async (req, res) => {
 });
 
 async function startServer() {
+  // Create the workspace directories so tools never operate outside them.
+  await fs.mkdir(WORKSPACE_ROOT, { recursive: true });
+  await fs.mkdir(DEFAULT_WORKSPACE, { recursive: true });
+  console.error(`Workspace dir ready at ${WORKSPACE_ROOT}`);
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

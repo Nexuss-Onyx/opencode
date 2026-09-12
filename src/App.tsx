@@ -32,8 +32,20 @@ function cn(...inputs: ClassValue[]) {
 export default function App() {
   const [projects, setProjects] = useState<Project[]>(() => {
     const saved = localStorage.getItem("opencode_projects");
-    if (saved) return JSON.parse(saved);
-    return [{ id: 'default', name: 'Default', path: '.' }];
+    if (saved) {
+      let savedProjects: Project[] = JSON.parse(saved);
+      // One-time migration: default project -> dedicated workspace folder,
+      // old ./projects/* -> ./workspace/*
+      savedProjects = savedProjects.map((p) => {
+        if (p.id === 'default') return { ...p, path: './workspace/_default' };
+        if (p.path && /^(\.\/)?projects\//.test(p.path)) {
+          return { ...p, path: `./workspace/${p.path.replace(/^(\.\/)?projects\//, '')}` };
+        }
+        return p;
+      });
+      return savedProjects;
+    }
+    return [{ id: 'default', name: 'Default', path: './workspace/_default' }];
   });
   const [activeProjectId, setActiveProjectId] = useState(() => {
     return localStorage.getItem("opencode_active_project") || projects[0]?.id || 'default';
@@ -157,7 +169,7 @@ export default function App() {
   const submitCreateProject = async () => {
     if (!newProjectName.trim()) return;
     const safeName = newProjectName.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const newPath = `./projects/${safeName}`;
+    const newPath = `./workspace/${safeName}`;
     
     await fetch("/api/mkdir", {
       method: "POST",
