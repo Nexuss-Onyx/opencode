@@ -1,0 +1,6 @@
+{
+  "name": "OpenCode",
+  "description": "An interactive CLI-like AI coding assistant tool running in the browser.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
