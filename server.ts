@@ -23,6 +23,21 @@ function normalizeBase(base: string): string {
   return url;
 }
 
+// Retry schedule for transient gateway failures (5xx / 429 / quota / overload)
+const RETRY_DELAYS_MS = [
+  1000, 3000, 6000, 12000, 20000, 40000, 60000, 120000, 300000, 600000,
+  900000, 1800000, 3600000,
+];
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isRetryable(status: number, message: string): boolean {
+  if (status === 0) return true; // network-level failure (connection refused, DNS, etc.)
+  if (status === 408 || status === 429 || status >= 500) return true;
+  return /quota|overload|rate[\s_-]?limit|timeout|busy|unavailable|server|capacity|throttl|too many/i.test(
+    message
+  );
+}
+
 // OpenAI-compatible chat completion against the OmniRoute gateway
 async function chatCompletion(messages: any[], openaiTools: any[]) {
   const body: any = {
@@ -37,21 +52,42 @@ async function chatCompletion(messages: any[], openaiTools: any[]) {
   if (openaiTools.length > 0) {
     body.tools = openaiTools;
   }
-  const res = await fetch(`${OMNIROUTE_API_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OMNIROUTE_API_KEY}`,
-      "x-api-key": OMNIROUTE_API_KEY,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`OmniRoute API error ${res.status}: ${text.slice(0, 500)}`);
+
+  let lastError: any = null;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      const res = await fetch(`${OMNIROUTE_API_BASE}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OMNIROUTE_API_KEY}`,
+          "x-api-key": OMNIROUTE_API_KEY,
+        },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data: any = await res.json();
+        return data.choices?.[0]?.message ?? null;
+      }
+      const text = await res.text();
+      lastError = new Error(`OmniRoute API error ${res.status}: ${text.slice(0, 500)}`);
+      if (!isRetryable(res.status, text)) break;
+    } catch (e: any) {
+      lastError = e;
+      if (!isRetryable(0, e?.message || "")) break;
+    }
+
+    if (attempt < RETRY_DELAYS_MS.length) {
+      const delayMs = RETRY_DELAYS_MS[attempt];
+      console.log(
+        `OmniRoute gateway retry ${attempt + 1}/${RETRY_DELAYS_MS.length} in ${Math.round(
+          delayMs / 1000
+        )}s — ${lastError?.message ?? "transient failure"}`
+      );
+      await sleep(delayMs);
+    }
   }
-  const data: any = await res.json();
-  return data.choices?.[0]?.message ?? null;
+  throw lastError ?? new Error("OmniRoute request failed after all retries");
 }
 
 // Convert the client's Gemini-style history (role + parts) into OpenAI messages

@@ -1,1 +1,51 @@
 @import "tailwindcss";
+
+@keyframes think-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+@keyframes think-pulse {
+  0%, 100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes think-ring {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.thinking-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: #a3a3a3;
+  animation: think-bounce 1.2s ease-in-out infinite;
+}
+
+.thinking-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  border: 2px solid rgba(163, 163, 163, 0.25);
+  border-top-color: #a3a3a3;
+  animation: think-ring 0.8s linear infinite;
+}
+
+.thinking-label {
+  animation: think-pulse 1.6s ease-in-out infinite;
+}

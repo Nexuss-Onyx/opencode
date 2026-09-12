@@ -361,8 +361,16 @@ export default function App() {
               )})}
               {isThinking && (
                 <div className="flex items-start">
-                  <div className="text-gray-500 flex items-center gap-2">
-                    <span className="text-[15px]">Thinking</span>
+                  <div className="flex items-center gap-2.5 rounded-xl border border-[#222] bg-[#141414] px-4 py-2.5 shadow-lg shadow-black/40">
+                    <div className="relative flex items-center justify-center w-4 h-4">
+                      <span className="thinking-spinner" />
+                    </div>
+                    <div className="flex items-center gap-[3px]">
+                      <span className="thinking-dot" />
+                      <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
+                      <span className="thinking-dot" style={{ animationDelay: "0.3s" }} />
+                    </div>
+                    <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400">Thinking</span>
                   </div>
                 </div>
               )}
