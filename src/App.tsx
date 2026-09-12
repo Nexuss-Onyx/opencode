@@ -16,7 +16,9 @@ import {
   GitBranch, 
   Folder,
   Loader2,
-  StopCircle
+  StopCircle,
+  ChevronUp,
+  ChevronDown
 } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 import { clsx, type ClassValue } from "clsx";
@@ -55,6 +57,7 @@ export default function App() {
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; total: number; delayMs: number; error: string } | null>(null);
   const [reasoningText, setReasoningText] = useState<string>("");
+  const [workingExpanded, setWorkingExpanded] = useState(true);
   const isThinkingRef = useRef(isThinking);
   const pendingSessionRef = useRef<{ session: Session; cwd: string } | null>(null);
   
@@ -505,33 +508,6 @@ export default function App() {
                   })}
                 </div>
               )})}
-              {isThinking && (
-                <div className="flex flex-col gap-4 min-h-[300px]">
-                  <div className="flex flex-col gap-2 items-start">
-                    <div className="flex items-center gap-2.5 rounded-xl border border-[#222] bg-[#141414] px-4 py-2.5 shadow-lg shadow-black/40">
-                      <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400">Thinking</span>
-                      <div className="flex items-center gap-[3px]">
-                        <span className="thinking-dot" />
-                        <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
-                        <span className="thinking-dot" style={{ animationDelay: "0.3s" }} />
-                      </div>
-                    </div>
-                    {retryInfo && (
-                      <div className="flex items-center gap-2 text-[12px] text-amber-300/90 px-1">
-                        <span>Retrying {retryInfo.attempt}/{retryInfo.total} in {Math.round(retryInfo.delayMs / 1000)}s</span>
-                        <span className="text-gray-600">·</span>
-                        <span className="text-gray-500 truncate max-w-[60vw]">{retryInfo.error}</span>
-                      </div>
-                    )}
-                    {reasoningText && !retryInfo && (
-                      <div className="text-[12px] text-gray-500 italic px-1 line-clamp-3 max-w-[70vw]">
-                        {reasoningText}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex-1 min-h-[180px]" />
-                </div>
-              )}
             </div>
           </div>
         )}
@@ -541,6 +517,45 @@ export default function App() {
           "absolute left-1/2 -translate-x-1/2 w-full max-w-3xl px-4 transition-all duration-300",
           activeSession.messages.length === 0 ? "top-1/2 -translate-y-1/2 mt-16" : "bottom-6"
         )}>
+          {isThinking && (
+            <div className="mb-3 rounded-xl border border-[#222] bg-[#151515]/95 shadow-2xl shadow-black/40 overflow-hidden backdrop-blur">
+              <button
+                onClick={() => setWorkingExpanded(!workingExpanded)}
+                className="w-full flex items-center gap-2.5 px-4 py-2.5 hover:bg-[#1c1c1c] transition-colors cursor-pointer select-none text-left"
+                title={workingExpanded ? "Collapse" : "Expand"}
+              >
+                <span className="flex items-center gap-[3px] shrink-0">
+                  <span className="thinking-dot" />
+                  <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
+                  <span className="thinking-dot" style={{ animationDelay: "0.3s" }} />
+                </span>
+                <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400 shrink-0">Working</span>
+                {retryInfo && (
+                  <span className="text-[12px] text-amber-300/90 truncate">
+                    Retrying {retryInfo.attempt}/{retryInfo.total} in {Math.round(retryInfo.delayMs / 1000)}s — {retryInfo.error}
+                  </span>
+                )}
+                <span className="ml-auto flex items-center gap-1 text-gray-500 shrink-0">
+                  {workingExpanded ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                </span>
+              </button>
+              {workingExpanded && (
+                <div className="border-t border-[#222] px-4 py-3">
+                  {retryInfo ? (
+                    <span className="text-[12px] text-amber-300/90 italic block">
+                      Waiting for the gateway — {retryInfo.error}
+                    </span>
+                  ) : reasoningText ? (
+                    <div className="max-h-64 overflow-y-auto text-[12px] leading-relaxed text-gray-400 whitespace-pre-wrap pr-2">
+                      {reasoningText}
+                    </div>
+                  ) : (
+                    <span className="text-[12px] text-gray-500 italic block">Running your request…</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <div className="bg-[#181818] border border-[#2a2a2a] rounded-xl flex flex-col overflow-hidden shadow-2xl focus-within:border-[#444] transition-colors">
             <textarea
               value={inputValue}
