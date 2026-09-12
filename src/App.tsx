@@ -72,6 +72,7 @@ export default function App() {
   const [workingExpanded, setWorkingExpanded] = useState(true);
   const isThinkingRef = useRef(isThinking);
   const pendingSessionRef = useRef<{ session: Session; cwd: string } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   
   // Custom dialog state for iframe safety
   const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
@@ -266,12 +267,23 @@ export default function App() {
     }
 
     try {
+      abortRef.current = new AbortController();
       await processChat(currentSession, activeProject.path);
     } catch (e) {
       console.error(e);
     } finally {
       setIsThinking(false);
+      abortRef.current = null;
     }
+  };
+
+  const handleStop = () => {
+    abortRef.current?.abort();
+    pendingSessionRef.current = null;
+    setIsThinking(false);
+    setIsReconnecting(false);
+    setRetryInfo(null);
+    setReasoningText("");
   };
 
   const processChat = async (session: Session, cwdOverride?: string) => {
@@ -287,9 +299,14 @@ export default function App() {
         res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: currentMessages, cwd })
+          body: JSON.stringify({ messages: currentMessages, cwd }),
+          signal: abortRef.current?.signal
         });
-      } catch (e) {
+      } catch (e: any) {
+        if (e?.name === "AbortError") {
+          keepGoing = false;
+          return;
+        }
         // Network dropped mid-request — queue for reconnect, show immediate feedback
         setIsOffline(true);
         setIsReconnecting(true);
@@ -341,7 +358,11 @@ export default function App() {
             }
           }
         }
-      } catch (e) {
+      } catch (e: any) {
+        if (e?.name === "AbortError") {
+          keepGoing = false;
+          return;
+        }
         setIsOffline(true);
         setIsReconnecting(true);
         pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
@@ -587,9 +608,15 @@ export default function App() {
                 <Plus size={20} />
               </button>
               <button 
-                onClick={handleSend}
-                disabled={!inputValue.trim() || isThinking}
-                className="bg-[#2a2a2a] hover:bg-[#3a3a3a] disabled:opacity-50 disabled:hover:bg-[#2a2a2a] text-gray-300 p-1.5 rounded-md transition-colors"
+                onClick={isThinking ? handleStop : handleSend}
+                disabled={!isThinking && !inputValue.trim()}
+                className={cn(
+                  "p-1.5 rounded-md transition-colors",
+                  isThinking
+                    ? "bg-red-900/40 hover:bg-red-900/70 text-red-300"
+                    : "bg-[#2a2a2a] hover:bg-[#3a3a3a] disabled:opacity-50 disabled:hover:bg-[#2a2a2a] text-gray-300"
+                )}
+                title={isThinking ? "Stop" : "Send"}
               >
                 {isThinking ? <StopCircle size={18} /> : <ArrowUp size={18} />}
               </button>

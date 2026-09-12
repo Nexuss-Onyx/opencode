@@ -28,7 +28,18 @@ const RETRY_DELAYS_MS = [
   1000, 3000, 6000, 12000, 20000, 40000, 60000, 120000, 300000, 600000,
   900000, 1800000, 3600000,
 ];
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        reject(new DOMException("Aborted", "AbortError"));
+      },
+      { once: true }
+    );
+  });
 
 function isRetryable(status: number, message: string): boolean {
   if (status === 0) return true; // network-level failure (connection refused, DNS, etc.)
@@ -125,7 +136,8 @@ async function readStream(res: any, onReasoning?: (text: string) => void): Promi
 async function chatCompletion(
   messages: any[],
   openaiTools: any[],
-  hooks?: { onRetry?: (info: any) => void; onReasoning?: (text: string) => void }
+  hooks?: { onRetry?: (info: any) => void; onReasoning?: (text: string) => void },
+  signal?: AbortSignal
 ) {
   let lastError: any = null;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
@@ -149,6 +161,7 @@ async function chatCompletion(
           "x-api-key": OMNIROUTE_API_KEY,
         },
         body: JSON.stringify(body),
+        signal,
       });
 
       if (!res.ok) {
@@ -178,6 +191,7 @@ async function chatCompletion(
       }
     } catch (e: any) {
       lastError = e;
+      if (e?.name === "AbortError") break;
       if (!isRetryable(0, e?.message || "")) break;
     }
 
@@ -194,7 +208,7 @@ async function chatCompletion(
         delayMs,
         error: lastError?.message ?? "transient failure",
       });
-      await sleep(delayMs);
+      await sleep(delayMs, signal);
     }
   }
   throw lastError ?? new Error("OmniRoute request failed after all retries");
@@ -618,6 +632,12 @@ app.post("/api/chat", async (req, res) => {
       parts: m.parts || [{ text: m.content }]
     }));
 
+    // Abort the gateway request if the client disconnects (e.g. user hits Stop)
+    const abortController = new AbortController();
+    req.on("close", () => {
+      if (!res.writableEnded) abortController.abort();
+    });
+
     res.setHeader("Content-Type", "application/x-ndjson");
     res.flushHeaders();
     const emit = (obj: any) => {
@@ -641,10 +661,15 @@ app.post("/api/chat", async (req, res) => {
       );
     }
 
-    const gptMessage = await chatCompletion(trimmedMessages, tools, {
-      onRetry: (info) => emit({ type: "retry", ...info }),
-      onReasoning: (text) => emit({ type: "reasoning", text }),
-    });
+    const gptMessage = await chatCompletion(
+      trimmedMessages,
+      tools,
+      {
+        onRetry: (info) => emit({ type: "retry", ...info }),
+        onReasoning: (text) => emit({ type: "reasoning", text }),
+      },
+      abortController.signal
+    );
 
     if (!gptMessage) {
       throw new Error("OmniRoute returned an empty response");
