@@ -292,6 +292,7 @@ export default function App() {
     let keepGoing = true;
     setRetryInfo(null);
     setReasoningText("");
+    console.log("[chat] round start", { cwd, messages: currentMessages.length });
 
     while (keepGoing) {
       let res: Response;
@@ -302,12 +303,15 @@ export default function App() {
           body: JSON.stringify({ messages: currentMessages, cwd }),
           signal: abortRef.current?.signal
         });
+        console.log("[chat] POST /api/chat ->", res.status, res.statusText);
       } catch (e: any) {
         if (e?.name === "AbortError") {
+          console.log("[chat] aborted by Stop");
           keepGoing = false;
           return;
         }
         // Network dropped mid-request — queue for reconnect, show immediate feedback
+        console.error("[chat] fetch failed", e);
         setIsOffline(true);
         setIsReconnecting(true);
         pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
@@ -322,6 +326,7 @@ export default function App() {
         } catch {
           errMsg = `HTTP ${res.status}`;
         }
+        console.error("[chat] non-OK response", res.status, errMsg);
         currentMessages.push({ role: "model", parts: [{ text: `Error: ${errMsg}` }] });
         setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
         break;
@@ -360,23 +365,31 @@ export default function App() {
         }
       } catch (e: any) {
         if (e?.name === "AbortError") {
+          console.log("[chat] stream aborted by Stop");
           keepGoing = false;
           return;
         }
+        console.error("[chat] stream read error", e);
         setIsOffline(true);
         setIsReconnecting(true);
         pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
         return;
       }
 
-      if (!data) break;
+      console.log("[chat] stream ended, terminal event:", data ? data.type : "NONE (no terminal event!)");
+      if (!data) {
+        console.error("[chat] stream ended with no terminal event — server may have died silently");
+        break;
+      }
 
       if (data.type === "function_calls") {
+        console.log("[chat] function_calls received, continuing loop");
         currentMessages.push(data.message);
         currentMessages.push(data.functionResponses);
         // update UI with new messages
         setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
       } else {
+        console.log("[chat] text received, finishing turn");
         currentMessages.push(data.message);
         setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
         keepGoing = false;

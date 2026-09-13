@@ -49,6 +49,11 @@ function isRetryable(status: number, message: string): boolean {
   );
 }
 
+const log = (tag: string, msg: string) =>
+  console.log(`[${new Date().toISOString()}] [${tag}] ${msg}`);
+const logErr = (tag: string, msg: string) =>
+  console.error(`[${new Date().toISOString()}] [${tag}] ${msg}`);
+
 // Read a gateway SSE stream. Reasoning deltas are pushed to the client live,
 // while content and tool calls are accumulated into a complete assistant message.
 async function readStream(res: any, onReasoning?: (text: string) => void): Promise<any> {
@@ -59,6 +64,9 @@ async function readStream(res: any, onReasoning?: (text: string) => void): Promi
   let reasoningAcc = "";
   const toolMap = new Map<number, any>();
   let sawChunk = false;
+  let chunkCount = 0;
+  let lastModel = "";
+  const finishReasons = new Map<string, number>();
 
   const build = (): any => {
     const message: any = { content: contentAcc || null };
@@ -77,7 +85,13 @@ async function readStream(res: any, onReasoning?: (text: string) => void): Promi
       buffer = buffer.slice(idx + 1);
       if (!line.startsWith("data:")) continue;
       const payload = line.slice(5).trim();
-      if (payload === "[DONE]") return build();
+      if (payload === "[DONE]") {
+        log(
+          "stream",
+          `gateway stream ended (chunks=${chunkCount}, model=${lastModel || "?"}, finish=${[...finishReasons.entries()].map(([k, v]) => `${k}x${v}`).join(", ")} || reasoning=${reasoningAcc.length} chars, content=${contentAcc.length} chars, tool_calls=${toolMap.size})`
+        );
+        return build();
+      }
       let ch: any = null;
       try {
         ch = JSON.parse(payload);
@@ -87,9 +101,14 @@ async function readStream(res: any, onReasoning?: (text: string) => void): Promi
       if (ch?.error) {
         throw new Error(`OmniRoute stream error: ${String(ch?.error?.message || ch?.error).slice(0, 300)}`);
       }
+      if (ch.model) lastModel = ch.model;
       const delta = ch?.choices?.[0]?.delta;
       if (!delta) continue;
       sawChunk = true;
+      chunkCount++;
+      if (ch?.choices?.[0]?.finish_reason) {
+        finishReasons.set(String(ch.choices[0].finish_reason), (finishReasons.get(String(ch.choices[0].finish_reason)) || 0) + 1);
+      }
       if (typeof delta.reasoning === "string") {
         reasoningAcc += delta.reasoning;
         onReasoning?.(reasoningAcc);
@@ -102,6 +121,9 @@ async function readStream(res: any, onReasoning?: (text: string) => void): Promi
           if (!cur) {
             cur = { id: tc.id || `call_${callIndex}`, type: "function", function: { name: "", arguments: "" } };
             toolMap.set(callIndex, cur);
+            if (tc.function?.name) {
+              log("stream", `tool_call chunk opened: idx=${callIndex} name=${tc.function.name || "(empty)"}`);
+            }
           }
           if (tc.id) cur.id = tc.id;
           if (tc.type) cur.type = tc.type;
@@ -111,6 +133,9 @@ async function readStream(res: any, onReasoning?: (text: string) => void): Promi
       }
     }
   }
+
+  // Stream ended without [DONE]
+  log("stream", `gateway stream ended WITHOUT [DONE] (chunks=${chunkCount}, model=${lastModel || "?"}, reasoning=${reasoningAcc.length} chars, content=${contentAcc.length} chars, tool_calls=${toolMap.size})`);
 
   // Fallback: gateway responded with plain JSON instead of SSE
   if (!sawChunk && buffer.trim()) {
@@ -140,7 +165,9 @@ async function chatCompletion(
   signal?: AbortSignal
 ) {
   let lastError: any = null;
+  log("chat", `chatCompletion start: messages=${messages.length}, payload=${JSON.stringify(messages).length} bytes, tools=${openaiTools.length}, maxTokens=800`);
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) log("chat", `attempt ${attempt + 1}/${RETRY_DELAYS_MS.length + 1}`);
     const body: any = {
       model: OMNIROUTE_MODEL,
       messages,
@@ -176,6 +203,7 @@ async function chatCompletion(
         const upstream = String(json?.error?.message || json?.message || text);
         const msg = `OmniRoute API error ${res.status}: ${upstream.slice(0, 500)}`;
         lastError = new Error(msg);
+        logErr("chat", `gateway HTTP ${res.status}: ${msg}`);
 
         if (
           /invalid_api_key|apikey|api.?key|unauthorized|forbidden|model.?not.?found|no such model|invalid model|not a model/i.test(
@@ -187,10 +215,16 @@ async function chatCompletion(
         }
         if (!isRetryable(res.status, upstream)) break;
       } else {
-        return await readStream(res, hooks?.onReasoning);
+        const gptMessage = await readStream(res, hooks?.onReasoning);
+        log(
+          "chat",
+          `attempt ${attempt + 1} OK -> tool_calls=${gptMessage?.tool_calls?.length || 0}, content=${(gptMessage?.content || "").length} chars, reasoning=${(gptMessage?.reasoning || "").length} chars`
+        );
+        return gptMessage;
       }
     } catch (e: any) {
       lastError = e;
+      logErr("chat", `request threw: ${e?.name || "Error"}: ${e?.message || e}`);
       if (e?.name === "AbortError") break;
       if (!isRetryable(0, e?.message || "")) break;
     }
@@ -613,11 +647,16 @@ app.delete("/api/rmdir", async (req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   const { messages, cwd } = req.body;
+  log(
+    "chat",
+    `POST /api/chat from ${req.ip || "?"}: cwd="${cwd || "(none)"}", messages=${Array.isArray(messages) ? messages.length : "?"}`
+  );
   // Always resolve the project cwd inside the workspace root; client paths are
   // relative to the app root (./workspace/<name>). Anything outside falls back
   // to the default workspace folder.
   const projectCwd =
     resolveInside(WORKSPACE_ROOT, path.resolve(process.cwd(), cwd || "")) || DEFAULT_WORKSPACE;
+  log("chat", `projectCwd=${projectCwd}`);
   if (!systemInstruction) {
     try {
       systemInstruction = await fs.readFile(path.join(process.cwd(), "src/opencode.md"), "utf8");
@@ -639,7 +678,12 @@ app.post("/api/chat", async (req, res) => {
     const abortController = new AbortController();
     let feedStarted = false;
     req.on("close", () => {
-      if (!res.writableEnded && !feedStarted) abortController.abort();
+      if (!res.writableEnded && !feedStarted) {
+        logErr("chat", `client connection closed BEFORE any response bytes (feedStarted=false) -> aborting gateway request`);
+        abortController.abort();
+      } else if (!res.writableEnded) {
+        log("chat", "client connection closed while streaming (feedStarted=true) — leaving stream running");
+      }
     });
 
     res.setHeader("Content-Type", "application/x-ndjson");
@@ -661,10 +705,15 @@ app.post("/api/chat", async (req, res) => {
 
     const trimmedMessages = trimMessagesToFit(openaiMessages);
     if (trimmedMessages.length !== openaiMessages.length) {
-      console.error(
-        `Trimmed history from ${openaiMessages.length} to ${trimmedMessages.length} messages (${JSON.stringify(openaiMessages).length} -> ${JSON.stringify(trimmedMessages).length} bytes)`
+      logErr(
+        "chat",
+        `history trimmed: ${openaiMessages.length} -> ${trimmedMessages.length} messages (${JSON.stringify(openaiMessages).length} -> ${JSON.stringify(trimmedMessages).length} bytes)`
       );
     }
+    log(
+      "chat",
+      `history -> ${trimmedMessages.length} messages (${JSON.stringify(trimmedMessages).length} bytes), roles=${trimmedMessages.map((m: any) => m.role).join(",")}`
+    );
 
     const gptMessage = await chatCompletion(
       trimmedMessages,
@@ -692,12 +741,20 @@ app.post("/api/chat", async (req, res) => {
     );
     if (reasoningText) {
       emit({ type: "reasoning", text: reasoningText });
+      log("chat", `emitted reasoning (${reasoningText.length} chars)`);
     }
 
     const responseMessage = toClientMessage(gptMessage);
+    log(
+      "chat",
+      `model reply parts=${responseMessage.parts.length}: ${responseMessage.parts
+        .map((p: any) => (p.functionCall ? `fn:${p.functionCall.name}` : p.text ? "text:" + p.text.length : "?"))
+        .join(" | ")}`
+    );
 
     // We handle function calls on the server
     const functionCallParts = responseMessage.parts.filter((p: any) => p.functionCall);
+    log("chat", `functionCallParts=${functionCallParts.length}`);
 
     if (functionCallParts.length > 0) {
       // Execute functions
@@ -705,6 +762,11 @@ app.post("/api/chat", async (req, res) => {
       for (const fp of functionCallParts) {
         const fc = fp.functionCall;
         let result = "";
+        const startedAt = Date.now();
+        log(
+          "chat",
+          `tool ${fc.name} args=${JSON.stringify(fc.args).slice(0, 400)}${fc.id ? ` id=${fc.id}` : ""}`
+        );
         try {
           const args = fc.args as any;
           if (fc.name === "bash") {
@@ -807,6 +869,10 @@ app.post("/api/chat", async (req, res) => {
         } catch (e: any) {
           result = `Error: ${e.message}`;
         }
+        log(
+          "chat",
+          `tool ${fc.name} done in ${Date.now() - startedAt}ms -> result ${result.length} chars, first 120: ${result.slice(0, 120).replace(/\n/g, "\\n")}`
+        );
         functionResponses.push({
           functionResponse: {
             name: fc.name,
@@ -817,6 +883,10 @@ app.post("/api/chat", async (req, res) => {
 
       // Return both the model's function calls and the results back to the client
       // so the client can append them to the chat history and make another request.
+      log(
+        "chat",
+        `round done: ${functionCallParts.length} function call(s) executed, emitting function_calls event, functionResponses=${functionResponses.length}`
+      );
       emit({
         type: "function_calls",
         message: responseMessage,
@@ -826,10 +896,12 @@ app.post("/api/chat", async (req, res) => {
       return;
     }
 
+    log("chat", `round done: emitting final text event`);
     emit({ type: "text", message: responseMessage });
     res.end();
   } catch (error: any) {
     if (error?.name === "AbortError") {
+      logErr("chat", "request aborted (client stopped or disconnected)");
       // Client stopped or disconnected — nothing to report.
       try {
         res.end();
