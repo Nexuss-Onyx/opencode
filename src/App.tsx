@@ -987,6 +987,8 @@ export default function App() {
         </div>
       </div>
 
+      </div>
+
       {benchOpen && (
         <aside className="w-[380px] shrink-0 border-l border-[#222] bg-[#101010] flex flex-col min-h-0">
           <div className="flex items-center justify-between h-12 px-4 border-b border-[#222] shrink-0">
