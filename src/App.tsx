@@ -290,109 +290,113 @@ export default function App() {
     const cwd = cwdOverride || activeProject.path;
     let currentMessages = [...session.messages];
     let keepGoing = true;
+    let emptyRounds = 0;
     setRetryInfo(null);
     setReasoningText("");
     console.log("[chat] round start", { cwd, messages: currentMessages.length });
 
     while (keepGoing) {
-      let res: Response;
-      try {
-        res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: currentMessages, cwd }),
-          signal: abortRef.current?.signal
-        });
-        console.log("[chat] POST /api/chat ->", res.status, res.statusText);
-      } catch (e: any) {
-        if (e?.name === "AbortError") {
-          console.log("[chat] aborted by Stop");
-          keepGoing = false;
-          return;
-        }
-        // Network dropped mid-request — queue for reconnect, show immediate feedback
-        console.error("[chat] fetch failed", e);
-        setIsOffline(true);
-        setIsReconnecting(true);
-        pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
-        return;
-      }
-
-      if (!res.ok) {
-        let errMsg = "";
-        try {
-          const errData = await res.json();
-          errMsg = errData.error || "Unknown error";
-        } catch {
-          errMsg = `HTTP ${res.status}`;
-        }
-        console.error("[chat] non-OK response", res.status, errMsg);
-        currentMessages.push({ role: "model", parts: [{ text: `Error: ${errMsg}` }] });
-        setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
-        break;
-      }
-
-      // NDJSON event stream: read retry/reasoning progress, then the final payload
+      // One "round" = fetch + read the NDJSON stream. Transient network errors
+      // (e.g. keep-alive socket reuse races) are retried a couple times before
+      // we give up and queue for reconnect.
       let data: any = null;
-      const reader = res.body?.getReader();
-      if (!reader) break;
-      const decoder = new TextDecoder();
-      let buffer = "";
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let idx: number;
-          while ((idx = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, idx).trim();
-            buffer = buffer.slice(idx + 1);
-            if (!line) continue;
-            let evt: any;
-            try { evt = JSON.parse(line); } catch { continue; }
-            if (evt.type === "retry") {
-              setRetryInfo({ attempt: evt.attempt, total: evt.total, delayMs: evt.delayMs, error: evt.error });
-            } else if (evt.type === "reasoning") {
-              setReasoningText(evt.text);
-            } else if (evt.type === "function_calls" || evt.type === "text") {
-              data = evt;
-            } else if (evt.type === "error") {
-              currentMessages.push({ role: "model", parts: [{ text: `Error: ${evt.error}` }] });
-              setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
-              keepGoing = false;
+      let attempt = 0;
+      for (; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          console.warn(`[chat] retrying round (${attempt}/2) after transient failure`);
+          await new Promise(r => setTimeout(r, 500 * attempt));
+        }
+        try {
+          const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: currentMessages, cwd }),
+            signal: abortRef.current?.signal
+          });
+          console.log("[chat] POST /api/chat ->", res.status, res.statusText);
+
+          if (!res.ok) {
+            let errMsg = "";
+            try {
+              const errData = await res.json();
+              errMsg = errData.error || "Unknown error";
+            } catch {
+              errMsg = `HTTP ${res.status}`;
+            }
+            console.error("[chat] non-OK response", res.status, errMsg);
+            currentMessages.push({ role: "model", parts: [{ text: `Error: ${errMsg}` }] });
+            setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
+            keepGoing = false;
+            break;
+          }
+
+          // NDJSON event stream: read retry/reasoning progress, then the final payload
+          const reader = res.body?.getReader();
+          if (!reader) throw new Error("No response body reader");
+          const decoder = new TextDecoder();
+          let buffer = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx: number;
+            while ((idx = buffer.indexOf("\n")) >= 0) {
+              const line = buffer.slice(0, idx).trim();
+              buffer = buffer.slice(idx + 1);
+              if (!line) continue;
+              let evt: any;
+              try { evt = JSON.parse(line); } catch { continue; }
+              if (evt.type === "retry") {
+                setRetryInfo({ attempt: evt.attempt, total: evt.total, delayMs: evt.delayMs, error: evt.error });
+              } else if (evt.type === "reasoning") {
+                setReasoningText(evt.text);
+              } else if (evt.type === "function_calls" || evt.type === "text") {
+                data = evt;
+              } else if (evt.type === "error") {
+                currentMessages.push({ role: "model", parts: [{ text: `Error: ${evt.error}` }] });
+                setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
+                keepGoing = false;
+              }
             }
           }
+          console.log("[chat] stream ended, terminal event:", data ? data.type : "NONE (no terminal event!)");
+          break; // round finished (with or without data)
+        } catch (e: any) {
+          if (e?.name === "AbortError") {
+            console.log("[chat] aborted by Stop");
+            keepGoing = false;
+            return;
+          }
+          console.error(`[chat] round failure (${attempt + 1}/3)`, e);
+          if (attempt >= 2) {
+            // Network dropped mid-request — queue for reconnect, show immediate feedback
+            setIsOffline(true);
+            setIsReconnecting(true);
+            pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
+            return;
+          }
         }
-      } catch (e: any) {
-        if (e?.name === "AbortError") {
-          console.log("[chat] stream aborted by Stop");
-          keepGoing = false;
-          return;
-        }
-        console.error("[chat] stream read error", e);
-        setIsOffline(true);
-        setIsReconnecting(true);
-        pendingSessionRef.current = { session: { ...session, messages: currentMessages }, cwd };
-        return;
       }
 
-      console.log("[chat] stream ended, terminal event:", data ? data.type : "NONE (no terminal event!)");
-      if (!data) {
-        console.error("[chat] stream ended with no terminal event — server may have died silently");
-        break;
-      }
-
-      if (data.type === "function_calls") {
+      if (keepGoing && data && data.type === "function_calls") {
         console.log("[chat] function_calls received, continuing loop");
         currentMessages.push(data.message);
         currentMessages.push(data.functionResponses);
         // update UI with new messages
         setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
-      } else {
+      } else if (keepGoing && data) {
         console.log("[chat] text received, finishing turn");
         currentMessages.push(data.message);
         setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
         keepGoing = false;
+      } else if (keepGoing) {
+        emptyRounds++;
+        console.error(`[chat] empty round ${emptyRounds}/2 (server ended stream without a terminal event)`);
+        if (emptyRounds >= 2) {
+          currentMessages.push({ role: "model", parts: [{ text: "Error: the server ended the request without a response. Try again." }] });
+          setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: currentMessages } : s));
+          keepGoing = false;
+        }
       }
     }
   };

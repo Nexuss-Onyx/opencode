@@ -671,20 +671,13 @@ app.post("/api/chat", async (req, res) => {
       parts: m.parts || [{ text: m.content }]
     }));
 
-    // Abort the gateway request only if the client disconnects BEFORE any
-    // response bytes have been written (e.g. user hits Stop). Proxies/load
-    // balancers routinely close keep-alive sockets' underlying connections
-    // while a stream is active — aborting then would silently kill responses.
+    // Do NOT abort the gateway request just because the underlying socket fired
+    // 'close' — proxies and keep-alive socket reuse routinely do this while the
+    // client is still active, which silently killed every second round. Instead,
+    // detect a truly-dead client via failed response writes below.
     const abortController = new AbortController();
+    let clientGone = false;
     let feedStarted = false;
-    req.on("close", () => {
-      if (!res.writableEnded && !feedStarted) {
-        logErr("chat", `client connection closed BEFORE any response bytes (feedStarted=false) -> aborting gateway request`);
-        abortController.abort();
-      } else if (!res.writableEnded) {
-        log("chat", "client connection closed while streaming (feedStarted=true) — leaving stream running");
-      }
-    });
 
     res.setHeader("Content-Type", "application/x-ndjson");
     res.flushHeaders();
@@ -693,6 +686,7 @@ app.post("/api/chat", async (req, res) => {
         res.write(JSON.stringify(obj) + "\n");
         feedStarted = true;
       } catch {
+        clientGone = true;
         /* client closed */
       }
     };
@@ -719,7 +713,12 @@ app.post("/api/chat", async (req, res) => {
       trimmedMessages,
       tools,
       {
-        onRetry: (info) => emit({ type: "retry", ...info }),
+        onRetry: (info) => {
+          // Client socket is confirmed dead (writes failing) — don't keep the
+          // upstream request alive through backoff.
+          if (clientGone) abortController.abort();
+          emit({ type: "retry", ...info });
+        },
         onReasoning: (text) => emit({ type: "reasoning", text }),
       },
       abortController.signal
