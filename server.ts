@@ -427,12 +427,11 @@ app.use(express.json({ limit: "50mb" }));
 
 const PORT = 3000;
 
-// Workspace root — every project (including the Default one) lives under here.
+// Workspace root — the agent works directly inside this folder.
 // Override with OMNIROUTE_WORKSPACE_DIR if you want e.g. /workspace.
 const WORKSPACE_ROOT = path.resolve(
   process.env.OMNIROUTE_WORKSPACE_DIR || path.join(process.cwd(), "workspace")
 );
-const DEFAULT_WORKSPACE = path.join(WORKSPACE_ROOT, "_default");
 
 const MAX_TOOL_RESULT_CHARS = 30000;
 const MAX_PAYLOAD_BYTES = 30000;
@@ -654,8 +653,7 @@ app.post("/api/chat", async (req, res) => {
   // Always resolve the project cwd inside the workspace root; client paths are
   // relative to the app root (./workspace/<name>). Anything outside falls back
   // to the default workspace folder.
-  const projectCwd =
-    resolveInside(WORKSPACE_ROOT, path.resolve(process.cwd(), cwd || "")) || DEFAULT_WORKSPACE;
+  const projectCwd = WORKSPACE_ROOT;
   log("chat", `projectCwd=${projectCwd}`);
   if (!systemInstruction) {
     try {
@@ -943,9 +941,8 @@ app.post("/api/chat", async (req, res) => {
 });
 
 async function startServer() {
-  // Create the workspace directories so tools never operate outside them.
+  // Create the workspace root so tools never operate outside it.
   await fs.mkdir(WORKSPACE_ROOT, { recursive: true });
-  await fs.mkdir(DEFAULT_WORKSPACE, { recursive: true });
   console.error(`Workspace dir ready at ${WORKSPACE_ROOT}`);
 
   // Vite middleware for development
