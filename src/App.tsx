@@ -204,7 +204,7 @@ export default function App() {
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; total: number; delayMs: number; error: string } | null>(null);
   const [reasoningText, setReasoningText] = useState<string>("");
-  const [todoExpanded, setTodoExpanded] = useState(true);
+  const [workingExpanded, setWorkingExpanded] = useState(true);
   const [benchOpen, setBenchOpen] = useState<boolean>(() => {
     const saved = localStorage.getItem("opencode_bench_open");
     return saved ? saved === "true" : false;
@@ -822,65 +822,37 @@ export default function App() {
           {isThinking && (
             <div className="mb-3 rounded-xl border border-[#222] bg-[#151515]/95 shadow-2xl shadow-black/40 overflow-hidden backdrop-blur">
               <button
-                onClick={() => setTodoExpanded(!todoExpanded)}
+                onClick={() => setWorkingExpanded(!workingExpanded)}
                 className="w-full flex items-center gap-2.5 px-4 py-2.5 hover:bg-[#1c1c1c] transition-colors cursor-pointer select-none text-left"
-                title={todoExpanded ? "Collapse" : "Expand"}
+                title={workingExpanded ? "Collapse" : "Expand"}
               >
                 <span className="flex items-center gap-[3px] shrink-0">
-                  <span className="w-[5px] h-[5px] rounded-full bg-[#a3a3a3]" />
-                  <span className="w-[5px] h-[5px] rounded-full bg-[#a3a3a3]" />
-                  <span className="w-[5px] h-[5px] rounded-full bg-[#a3a3a3] opacity-70" />
+                  <span className="thinking-dot" />
+                  <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
+                  <span className="thinking-dot" style={{ animationDelay: "0.3s" }} />
                 </span>
-                <span className="text-[13px] font-medium tracking-wide text-gray-400 truncate">{pillLabel}</span>
+                <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400 shrink-0">Working</span>
                 {retryInfo && (
                   <span className="text-[12px] text-amber-300/90 truncate">
                     Retrying {retryInfo.attempt}/{retryInfo.total} in {Math.round(retryInfo.delayMs / 1000)}s — {retryInfo.error}
                   </span>
                 )}
-                <span className="ml-auto flex items-center gap-2 text-gray-500 shrink-0">
-                  <span className="flex items-center gap-1.5 text-[11px] text-gray-500">
-                    <ListChecks size={13} />
-                    Todo
-                    {todoItems.length > 0 && (
-                      <span className="text-gray-600">
-                        {todoItems.filter(t => t.status !== "completed").length}/{todoItems.length}
-                      </span>
-                    )}
-                  </span>
-                  {todoExpanded ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                <span className="ml-auto flex items-center gap-1 text-gray-500 shrink-0">
+                  {workingExpanded ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
                 </span>
               </button>
-              {todoExpanded && (
-                <div className="border-t border-[#222] px-4 py-3 max-h-64 overflow-y-auto">
-                  {todoItems.length === 0 ? (
-                    <span className="text-[12px] text-gray-500 italic block">No todos yet.</span>
+              {workingExpanded && (
+                <div className="border-t border-[#222] px-4 py-3">
+                  {retryInfo ? (
+                    <span className="text-[12px] text-amber-300/90 italic block">
+                      Waiting for the gateway — {retryInfo.error}
+                    </span>
+                  ) : reasoningText ? (
+                    <div className="max-h-64 overflow-y-auto text-[12px] leading-relaxed text-gray-400 whitespace-pre-wrap pr-2">
+                      {reasoningText}
+                    </div>
                   ) : (
-                    <ul className="flex flex-col gap-1.5">
-                      {todoItems.map((t, i) => (
-                        <li key={t.id ?? i} className="flex items-center gap-2.5 text-[13px]">
-                          <span className={cn(
-                            "w-2 h-2 rounded-full shrink-0",
-                            t.status === "completed" ? "bg-emerald-500"
-                              : t.status === "in_progress" ? "bg-amber-400"
-                                : "bg-[#3a3a3a]"
-                          )} />
-                          <span className={cn(
-                            "flex-1 leading-snug",
-                            t.status === "completed" ? "text-gray-500 line-through" : "text-gray-300"
-                          )}>
-                            {t.content}
-                          </span>
-                          {t.priority && (
-                            <span className="text-[10px] uppercase tracking-wide text-gray-500 border border-[#2a2a2a] px-1.5 py-0.5 rounded shrink-0">
-                              {String(t.priority)}
-                            </span>
-                          )}
-                          <span className="text-[10px] uppercase tracking-wide text-gray-600 shrink-0">
-                            {String(t.status).replace("_", " ")}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
+                    <span className="text-[12px] text-gray-500 italic block">Running your request…</span>
                   )}
                 </div>
               )}
@@ -1020,6 +992,47 @@ export default function App() {
                 <span className="text-gray-600 italic">Idle — new thoughts stream here automatically.</span>
               ) : (
                 chunks.map((c, i) => <div key={i}>{c.text}</div>)
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-col border-b border-[#222] shrink-0">
+            <div className="flex items-center justify-between px-4 pt-3 pb-2">
+              <span className="text-[11px] font-medium uppercase tracking-widest text-gray-600">Todo</span>
+              <span className="text-[11px] text-gray-600">
+                {todoItems.filter(t => t.status !== "completed").length}/{todoItems.length}
+              </span>
+            </div>
+            <div className="bench-scroll max-h-[200px] overflow-y-auto px-4 pb-3">
+              {todoItems.length === 0 ? (
+                <span className="text-[12px] text-gray-600 italic">No todos yet.</span>
+              ) : (
+                <ul className="flex flex-col gap-1.5">
+                  {todoItems.map((t, i) => (
+                    <li key={t.id ?? i} className="flex items-center gap-2.5 text-[13px]">
+                      <span className={cn(
+                        "w-2 h-2 rounded-full shrink-0",
+                        t.status === "completed" ? "bg-emerald-500"
+                          : t.status === "in_progress" ? "bg-amber-400"
+                            : "bg-[#3a3a3a]"
+                      )} />
+                      <span className={cn(
+                        "flex-1 leading-snug",
+                        t.status === "completed" ? "text-gray-500 line-through" : "text-gray-300"
+                      )}>
+                        {t.content}
+                      </span>
+                      {t.priority && (
+                        <span className="text-[10px] uppercase tracking-wide text-gray-500 border border-[#2a2a2a] px-1.5 py-0.5 rounded shrink-0">
+                          {String(t.priority)}
+                        </span>
+                      )}
+                      <span className="text-[10px] uppercase tracking-wide text-gray-600 shrink-0">
+                        {String(t.status).replace("_", " ")}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
           </div>
