@@ -758,14 +758,17 @@ app.post("/api/chat", async (req, res) => {
     if (functionCallParts.length > 0) {
       // Execute functions
       const functionResponses = [];
+      let fcIndex = 0;
       for (const fp of functionCallParts) {
         const fc = fp.functionCall;
         let result = "";
         const startedAt = Date.now();
+        const toolId = fc.id || `call_${fcIndex++}`;
         log(
           "chat",
           `tool ${fc.name} args=${JSON.stringify(fc.args).slice(0, 400)}${fc.id ? ` id=${fc.id}` : ""}`
         );
+        emit({ type: "tool", id: toolId, name: fc.name, status: "running" });
         try {
           const args = fc.args as any;
           if (fc.name === "bash") {
@@ -841,7 +844,16 @@ app.post("/api/chat", async (req, res) => {
           } else if (fc.name === "task") {
              result = `Simulated launching subagent: ${args.subagent_type} (task_id: ${args.task_id || "new"})`;
           } else if (fc.name === "todowrite") {
-             result = "Todo list updated in background.";
+             const items = Array.isArray(args.todos)
+               ? args.todos.map((t: any, i: number) => ({
+                   id: t.id ?? `todo_${fcIndex}_${i}`,
+                   content: String(t.content ?? ""),
+                   status: t.status ?? "pending",
+                   priority: t.priority ?? null
+                 }))
+               : [{ id: `todo_${fcIndex}_0`, content: String(args.todos ?? ""), status: "pending", priority: null }];
+             emit({ type: "todo", items });
+             result = `Todo list updated: ${items.length} item(s).`;
           } else if (fc.name === "webfetch") {
              try {
                 let urlStr = args.url;
@@ -868,6 +880,14 @@ app.post("/api/chat", async (req, res) => {
         } catch (e: any) {
           result = `Error: ${e.message}`;
         }
+        emit({
+          type: "tool",
+          id: toolId,
+          name: fc.name,
+          status: result.startsWith("Error:") ? "error" : "done",
+          ms: Date.now() - startedAt,
+          preview: result.slice(0, 80)
+        });
         log(
           "chat",
           `tool ${fc.name} done in ${Date.now() - startedAt}ms -> result ${result.length} chars, first 120: ${result.slice(0, 120).replace(/\n/g, "\\n")}`

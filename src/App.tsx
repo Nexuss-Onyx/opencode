@@ -15,10 +15,22 @@ import {
   ArrowUp, 
   GitBranch, 
   Folder,
-  Loader2,
   StopCircle,
   ChevronUp,
-  ChevronDown
+  ChevronDown,
+  Terminal,
+  PenLine,
+  BookOpen,
+  FilePlus2,
+  ListFilter,
+  Search,
+  Globe,
+  ListChecks,
+  HelpCircle,
+  Sparkles,
+  Bot,
+  PanelRightClose,
+  Cpu
 } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 import { clsx, type ClassValue } from "clsx";
@@ -27,6 +39,129 @@ import { Message, Session, Project } from "./types";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+type ToolRun = {
+  id: string;
+  name: string;
+  status: "running" | "done" | "error" | "stopped";
+  ms?: number;
+  preview?: string;
+};
+
+type TodoItem = {
+  id?: string;
+  content: string;
+  status: string;
+  priority?: string | null;
+};
+
+const TOOL_ICONS: Record<string, any> = {
+  bash: Terminal,
+  edit: PenLine,
+  read: BookOpen,
+  write: FilePlus2,
+  glob: ListFilter,
+  grep: Search,
+  webfetch: Globe,
+  todowrite: ListChecks,
+  question: HelpCircle,
+  skill: Sparkles,
+  task: Bot
+};
+
+const TOOL_COLORS: Record<string, string> = {
+  bash: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+  edit: "text-amber-400 bg-amber-500/10 border-amber-500/20",
+  read: "text-blue-400 bg-blue-500/10 border-blue-500/20",
+  write: "text-violet-400 bg-violet-500/10 border-violet-500/20",
+  glob: "text-cyan-400 bg-cyan-500/10 border-cyan-500/20",
+  grep: "text-teal-400 bg-teal-500/10 border-teal-500/20",
+  webfetch: "text-indigo-400 bg-indigo-500/10 border-indigo-500/20",
+  todowrite: "text-rose-400 bg-rose-500/10 border-rose-500/20",
+  question: "text-purple-400 bg-purple-500/10 border-purple-500/20",
+  skill: "text-fuchsia-400 bg-fuchsia-500/10 border-fuchsia-500/20",
+  task: "text-green-400 bg-green-500/10 border-green-500/20"
+};
+
+const ACTIVE_LABEL: Record<string, string> = {
+  bash: "exec…",
+  read: "Reading…",
+  write: "Writing…",
+  edit: "Editing…",
+  glob: "Searching…",
+  grep: "Grepping…",
+  webfetch: "Fetching…",
+  todowrite: "Syncing todos…",
+  question: "Asking you…",
+  skill: "Loading…",
+  task: "Delegating…"
+};
+
+function toolDoneText(name: string): string {
+  switch (name) {
+    case "bash": return "Ran";
+    case "read": return "Read";
+    case "write": return "Written";
+    case "edit": return "Edited";
+    case "glob": return "Found";
+    case "grep": return "Matches";
+    case "webfetch": return "Fetched";
+    case "todowrite": return "Todo updated";
+    case "question": return "Answered";
+    case "skill": return "Skill ready";
+    case "task": return "Report ready";
+    default: return "Done";
+  }
+}
+
+function toolFailedText(name: string): string {
+  switch (name) {
+    case "bash": return "Command failed";
+    case "read": return "Read failed";
+    case "write": return "Write failed";
+    case "edit": return "Edit failed";
+    case "glob": return "Search failed";
+    case "grep": return "Grep failed";
+    case "webfetch": return "Fetch failed";
+    case "todowrite": return "Todo sync failed";
+    case "question": return "Ask cancelled";
+    case "skill": return "Load failed";
+    case "task": return "Delegation failed";
+    default: return "Failed";
+  }
+}
+
+function ToolRow({ run }: { run: ToolRun }) {
+  const Icon = TOOL_ICONS[run.name] || Cpu;
+  const colorCls = TOOL_COLORS[run.name] || "text-gray-400 bg-gray-500/10 border-gray-500/20";
+  const st =
+    run.status === "done"
+      ? { val: toolDoneText(run.name), cls: "text-emerald-400" }
+      : run.status === "error"
+        ? { val: toolFailedText(run.name), cls: "text-red-400" }
+        : run.status === "stopped"
+          ? { val: "Interrupted", cls: "text-gray-500" }
+          : { val: ACTIVE_LABEL[run.name] || `${run.name}…`, cls: "text-gray-400" };
+  return (
+    <div className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg border border-[#222] bg-[#141414]">
+      <span className={cn("w-7 h-7 rounded-md border grid place-items-center shrink-0", colorCls)}>
+        <Icon size={14} />
+      </span>
+      <div className="flex flex-col min-w-0 flex-1">
+        <span className="text-[12px] font-medium text-gray-300">{run.name}</span>
+        <span className={cn("text-[11px] font-mono", st.cls)}>
+          {st.val}
+          {run.ms != null && run.status !== "running" ? ` · ${run.ms}ms` : ""}
+        </span>
+      </div>
+      {run.preview && (
+        <span className="text-[10px] text-gray-600 truncate max-w-[110px] font-mono" title={run.preview}>
+          {run.preview}
+        </span>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
@@ -69,10 +204,23 @@ export default function App() {
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; total: number; delayMs: number; error: string } | null>(null);
   const [reasoningText, setReasoningText] = useState<string>("");
-  const [workingExpanded, setWorkingExpanded] = useState(true);
+  const [todoExpanded, setTodoExpanded] = useState(true);
+  const [benchOpen, setBenchOpen] = useState<boolean>(() => {
+    const saved = localStorage.getItem("opencode_bench_open");
+    return saved ? saved === "true" : false;
+  });
+  const [pillLabel, setPillLabel] = useState<string>("Working…");
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
+  const [toolFeed, setToolFeed] = useState<ToolRun[]>([]);
+  const [chunks, setChunks] = useState<{ text: string; ts: number }[]>([]);
   const isThinkingRef = useRef(isThinking);
   const pendingSessionRef = useRef<{ session: Session; cwd: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const lastReasoningLenRef = useRef(0);
+  const chunkLogRef = useRef<{ text: string; ts: number }[]>([]);
+  const lastChunkAtRef = useRef(0);
+  const momentumRef = useRef({ v: 0 });
+  const thinkingScrollRef = useRef<HTMLDivElement>(null);
   
   // Custom dialog state for iframe safety
   const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
@@ -93,6 +241,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("opencode_sessions", JSON.stringify(sessions));
   }, [sessions]);
+
+  useEffect(() => {
+    localStorage.setItem("opencode_bench_open", String(benchOpen));
+  }, [benchOpen]);
+
+  useEffect(() => {
+    setTodoItems([]);
+  }, [activeSessionId]);
 
   useEffect(() => {
     if (!projectSessions.find(s => s.id === activeSessionId)) {
@@ -154,6 +310,62 @@ export default function App() {
       window.removeEventListener("offline", goOffline);
     };
   }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = Date.now();
+      const cutoff = now - 1000;
+      const log = chunkLogRef.current;
+      let rate = 0;
+      for (const c of log) if (c.ts >= cutoff) rate++;
+      while (log.length && log[0].ts < now - 2000) log.shift();
+      const target = rate > 0 ? Math.min(160, 28 + 22 * rate) : 0;
+      momentumRef.current.v += (target - momentumRef.current.v) * 0.35;
+      if (benchOpen && momentumRef.current.v > 1 && thinkingScrollRef.current) {
+        thinkingScrollRef.current.scrollTop += momentumRef.current.v * 0.09;
+      }
+    }, 90);
+    return () => clearInterval(id);
+  }, [benchOpen]);
+
+  useEffect(() => {
+    if (benchOpen && thinkingScrollRef.current) {
+      requestAnimationFrame(() => {
+        const el = thinkingScrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    }
+  }, [benchOpen]);
+
+  useEffect(() => {
+    if (!isThinking) {
+      setPillLabel("Working…");
+      return;
+    }
+    const tick = () => {
+      const running = toolFeed.find(t => t.status === "running");
+      if (running) {
+        setPillLabel(ACTIVE_LABEL[running.name] || `${running.name}…`);
+        return;
+      }
+      const idle = Date.now() - lastChunkAtRef.current;
+      if (lastChunkAtRef.current && idle < 3000) {
+        const log = chunkLogRef.current;
+        let tail = "";
+        for (let i = log.length - 1; i >= 0; i--) {
+          const t = log[i].text.trim();
+          if (t) { tail = t; break; }
+        }
+        const flat = tail.replace(/\s+/g, " ");
+        setPillLabel(flat.length > 70 ? "…" + flat.slice(-70) : flat);
+      } else {
+        setPillLabel("Working…");
+      }
+    };
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [isThinking, toolFeed]);
 
   const handleNewSession = () => {
     const newSession = { id: uuidv4(), title: "New session", messages: [], projectId: activeProjectId };
@@ -284,6 +496,7 @@ export default function App() {
     setIsReconnecting(false);
     setRetryInfo(null);
     setReasoningText("");
+    setToolFeed(prev => prev.map(t => t.status === "running" ? { ...t, status: "stopped" } : t));
   };
 
   const processChat = async (session: Session, cwdOverride?: string) => {
@@ -293,6 +506,12 @@ export default function App() {
     let emptyRounds = 0;
     setRetryInfo(null);
     setReasoningText("");
+    setToolFeed([]);
+    setChunks([]);
+    lastReasoningLenRef.current = 0;
+    lastChunkAtRef.current = 0;
+    momentumRef.current.v = 0;
+    chunkLogRef.current = [];
     console.log("[chat] round start", { cwd, messages: currentMessages.length });
 
     while (keepGoing) {
@@ -349,7 +568,31 @@ export default function App() {
               if (evt.type === "retry") {
                 setRetryInfo({ attempt: evt.attempt, total: evt.total, delayMs: evt.delayMs, error: evt.error });
               } else if (evt.type === "reasoning") {
-                setReasoningText(evt.text);
+                const full = String(evt.text ?? "");
+                const prevLen = lastReasoningLenRef.current;
+                const delta = full.length > prevLen ? full.slice(prevLen) : full;
+                lastReasoningLenRef.current = full.length;
+                setReasoningText(full);
+                if (delta.trim()) {
+                  const ts = Date.now();
+                  chunkLogRef.current.push({ text: delta, ts });
+                  lastChunkAtRef.current = ts;
+                  setChunks(prev => prev.length > 300 ? [...prev.slice(prev.length - 300), { text: delta, ts }] : [...prev, { text: delta, ts }]);
+                }
+              } else if (evt.type === "tool") {
+                setToolFeed(prev => {
+                  if (evt.status === "running") {
+                    if (prev.some(t => t.id === evt.id)) {
+                      return prev.map(t => t.id === evt.id ? { ...t, status: "running" } : t);
+                    }
+                    return [...prev, { id: evt.id, name: String(evt.name ?? "tool"), status: "running" }];
+                  }
+                  return prev.map(t => t.id === evt.id
+                    ? { ...t, status: evt.status, ms: evt.ms, preview: evt.preview }
+                    : t);
+                });
+              } else if (evt.type === "todo") {
+                if (Array.isArray(evt.items)) setTodoItems(evt.items);
               } else if (evt.type === "function_calls" || evt.type === "text") {
                 data = evt;
               } else if (evt.type === "error") {
@@ -402,7 +645,8 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#0d0d0d] text-gray-300 font-sans selection:bg-gray-700">
+    <div className="flex h-screen w-full bg-[#0d0d0d] text-gray-300 font-sans selection:bg-gray-700">
+      <div className="relative flex-1 min-w-0 flex flex-col">
       {/* Title bar */}
       <div className="flex items-center justify-between h-12 px-3 border-b border-[#222]">
         <div className="flex items-center gap-3">
@@ -533,10 +777,18 @@ export default function App() {
                 return (
                 <div key={i} className={cn("flex flex-col gap-1", msg.role === "user" ? "items-end" : "items-start")}>
                   {msg.role === "model" && msg.parts.some(p => p.functionCall) && (
-                    <div className="text-xs text-gray-500 flex items-center gap-2 bg-[#1a1a1a] px-3 py-2 rounded-md border border-[#2a2a2a]">
-                      <Loader2 size={12} className="animate-spin" />
-                      <span>Running tools...</span>
-                    </div>
+                    <button
+                      onClick={() => setBenchOpen(true)}
+                      title="Open Tool Bench"
+                      className="text-[12px] text-gray-400 hover:text-gray-200 flex items-center gap-2 bg-[#161616] hover:bg-[#1c1c1c] px-3 py-1.5 rounded-md border border-[#2a2a2a] transition-colors select-none cursor-pointer max-w-[90%]"
+                    >
+                      <Cpu size={12} className="shrink-0 text-gray-500" />
+                      <span className="shrink-0">Used tools:</span>
+                      <span className="truncate text-gray-500">
+                        {msg.parts.filter(p => p.functionCall).map(p => (p as any).functionCall?.name).join(" · ")}
+                      </span>
+                      <span className="shrink-0 text-gray-600">view ⟩</span>
+                    </button>
                   )}
                   {msg.parts.map((p, j) => {
                     if (p.text) {
@@ -570,37 +822,65 @@ export default function App() {
           {isThinking && (
             <div className="mb-3 rounded-xl border border-[#222] bg-[#151515]/95 shadow-2xl shadow-black/40 overflow-hidden backdrop-blur">
               <button
-                onClick={() => setWorkingExpanded(!workingExpanded)}
+                onClick={() => setTodoExpanded(!todoExpanded)}
                 className="w-full flex items-center gap-2.5 px-4 py-2.5 hover:bg-[#1c1c1c] transition-colors cursor-pointer select-none text-left"
-                title={workingExpanded ? "Collapse" : "Expand"}
+                title={todoExpanded ? "Collapse" : "Expand"}
               >
                 <span className="flex items-center gap-[3px] shrink-0">
-                  <span className="thinking-dot" />
-                  <span className="thinking-dot" style={{ animationDelay: "0.15s" }} />
-                  <span className="thinking-dot" style={{ animationDelay: "0.3s" }} />
+                  <span className="w-[5px] h-[5px] rounded-full bg-[#a3a3a3]" />
+                  <span className="w-[5px] h-[5px] rounded-full bg-[#a3a3a3]" />
+                  <span className="w-[5px] h-[5px] rounded-full bg-[#a3a3a3] opacity-70" />
                 </span>
-                <span className="thinking-label text-[13px] font-medium tracking-wide text-gray-400 shrink-0">Working</span>
+                <span className="text-[13px] font-medium tracking-wide text-gray-400 truncate">{pillLabel}</span>
                 {retryInfo && (
                   <span className="text-[12px] text-amber-300/90 truncate">
                     Retrying {retryInfo.attempt}/{retryInfo.total} in {Math.round(retryInfo.delayMs / 1000)}s — {retryInfo.error}
                   </span>
                 )}
-                <span className="ml-auto flex items-center gap-1 text-gray-500 shrink-0">
-                  {workingExpanded ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                <span className="ml-auto flex items-center gap-2 text-gray-500 shrink-0">
+                  <span className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                    <ListChecks size={13} />
+                    Todo
+                    {todoItems.length > 0 && (
+                      <span className="text-gray-600">
+                        {todoItems.filter(t => t.status !== "completed").length}/{todoItems.length}
+                      </span>
+                    )}
+                  </span>
+                  {todoExpanded ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
                 </span>
               </button>
-              {workingExpanded && (
-                <div className="border-t border-[#222] px-4 py-3">
-                  {retryInfo ? (
-                    <span className="text-[12px] text-amber-300/90 italic block">
-                      Waiting for the gateway — {retryInfo.error}
-                    </span>
-                  ) : reasoningText ? (
-                    <div className="max-h-64 overflow-y-auto text-[12px] leading-relaxed text-gray-400 whitespace-pre-wrap pr-2">
-                      {reasoningText}
-                    </div>
+              {todoExpanded && (
+                <div className="border-t border-[#222] px-4 py-3 max-h-64 overflow-y-auto">
+                  {todoItems.length === 0 ? (
+                    <span className="text-[12px] text-gray-500 italic block">No todos yet.</span>
                   ) : (
-                    <span className="text-[12px] text-gray-500 italic block">Running your request…</span>
+                    <ul className="flex flex-col gap-1.5">
+                      {todoItems.map((t, i) => (
+                        <li key={t.id ?? i} className="flex items-center gap-2.5 text-[13px]">
+                          <span className={cn(
+                            "w-2 h-2 rounded-full shrink-0",
+                            t.status === "completed" ? "bg-emerald-500"
+                              : t.status === "in_progress" ? "bg-amber-400"
+                                : "bg-[#3a3a3a]"
+                          )} />
+                          <span className={cn(
+                            "flex-1 leading-snug",
+                            t.status === "completed" ? "text-gray-500 line-through" : "text-gray-300"
+                          )}>
+                            {t.content}
+                          </span>
+                          {t.priority && (
+                            <span className="text-[10px] uppercase tracking-wide text-gray-500 border border-[#2a2a2a] px-1.5 py-0.5 rounded shrink-0">
+                              {String(t.priority)}
+                            </span>
+                          )}
+                          <span className="text-[10px] uppercase tracking-wide text-gray-600 shrink-0">
+                            {String(t.status).replace("_", " ")}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
               )}
@@ -706,6 +986,59 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {benchOpen && (
+        <aside className="w-[380px] shrink-0 border-l border-[#222] bg-[#101010] flex flex-col min-h-0">
+          <div className="flex items-center justify-between h-12 px-4 border-b border-[#222] shrink-0">
+            <div className="flex items-center gap-2">
+              <Cpu size={15} className="text-gray-400" />
+              <span className="text-[13px] font-medium tracking-wide text-gray-300">Tool Bench</span>
+            </div>
+            <button
+              onClick={() => setBenchOpen(false)}
+              title="Close bench"
+              className="p-1.5 hover:bg-[#222] rounded text-gray-500 hover:text-gray-300"
+            >
+              <PanelRightClose size={16} />
+            </button>
+          </div>
+
+          <div className="flex flex-col border-b border-[#222] shrink-0">
+            <div className="flex items-center justify-between px-4 pt-3 pb-2">
+              <span className="text-[11px] font-medium uppercase tracking-widest text-gray-600">Thinking</span>
+              <span className="text-[11px] text-gray-600">
+                {chunks.length} chunk{chunks.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div
+              ref={thinkingScrollRef}
+              className="bench-scroll max-h-[220px] min-h-[60px] overflow-y-auto px-4 pb-3 text-[12px] leading-relaxed text-gray-400 whitespace-pre-wrap font-mono"
+            >
+              {chunks.length === 0 ? (
+                <span className="text-gray-600 italic">Idle — new thoughts stream here automatically.</span>
+              ) : (
+                chunks.map((c, i) => <div key={i}>{c.text}</div>)
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-col flex-1 min-h-0">
+            <div className="flex items-center justify-between px-4 pt-3 pb-2 shrink-0">
+              <span className="text-[11px] font-medium uppercase tracking-widest text-gray-600">Tools</span>
+              <span className="text-[11px] text-gray-600">
+                {toolFeed.length} run{toolFeed.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            {toolFeed.length === 0 ? (
+              <div className="px-4 pb-3 text-[12px] text-gray-600 italic">Idle — tool activity appears here in real time.</div>
+            ) : (
+              <div className="bench-scroll flex flex-col gap-1 px-3 pb-4 overflow-y-auto flex-1">
+                {toolFeed.map(t => <ToolRow key={t.id} run={t} />)}
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
 
       {/* Custom Dialog Modals */}
       {newProjectModalOpen && (
