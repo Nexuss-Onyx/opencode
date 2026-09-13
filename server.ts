@@ -632,10 +632,14 @@ app.post("/api/chat", async (req, res) => {
       parts: m.parts || [{ text: m.content }]
     }));
 
-    // Abort the gateway request if the client disconnects (e.g. user hits Stop)
+    // Abort the gateway request only if the client disconnects BEFORE any
+    // response bytes have been written (e.g. user hits Stop). Proxies/load
+    // balancers routinely close keep-alive sockets' underlying connections
+    // while a stream is active — aborting then would silently kill responses.
     const abortController = new AbortController();
+    let feedStarted = false;
     req.on("close", () => {
-      if (!res.writableEnded) abortController.abort();
+      if (!res.writableEnded && !feedStarted) abortController.abort();
     });
 
     res.setHeader("Content-Type", "application/x-ndjson");
@@ -643,6 +647,7 @@ app.post("/api/chat", async (req, res) => {
     const emit = (obj: any) => {
       try {
         res.write(JSON.stringify(obj) + "\n");
+        feedStarted = true;
       } catch {
         /* client closed */
       }
