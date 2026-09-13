@@ -824,6 +824,15 @@ app.post("/api/chat", async (req, res) => {
     emit({ type: "text", message: responseMessage });
     res.end();
   } catch (error: any) {
+    if (error?.name === "AbortError") {
+      // Client stopped or disconnected — nothing to report.
+      try {
+        res.end();
+      } catch {
+        /* socket already gone */
+      }
+      return;
+    }
     console.error("API error", error);
     if (res.headersSent) {
       try {
